@@ -1,0 +1,79 @@
+os-project/
+├── Makefile                          Shubham
+├── README.md                         Shubham
+├── .gitignore                        Shubham   (bin/, *.o, disk.img, logs/)
+│
+├── include/
+│   ├── common.h                      All (Day 1): BLOCK_SIZE, NUM_BLOCKS, error codes
+│   ├── protocol.h                    Shubham   commands, FIFO paths, limits
+│   ├── fifo_util.h                   Shubham
+│   ├── session.h                     Shubham   session struct shared with the server
+│   ├── log.h                         Shubham
+│   ├── disk.h                        Arjun
+│   ├── fs.h                          Arjun     fs_* API, superblock/inode/dir-entry structs
+│   ├── server.h                      Shwetank
+│   ├── threadpool.h                  Shwetank
+│   ├── dispatcher.h                  Shwetank
+│   ├── rwlock.h                      Shwetank
+│   ├── cache.h                       Shwetank
+│   ├── sched.h                       Aarush
+│   └── waitfor.h                     Aarush
+│
+├── src/
+│   ├── disk.c                        Arjun     simulated disk, disk.img load/save
+│   ├── alloc.c                       Arjun     bitmap, inodes, indexed allocation
+│   ├── dir.c                         Arjun     directory entries, path resolution
+│   ├── fs.c                          Arjun     fs_* API, open-file table, fs_report, fs_check
+│   ├── fifo_util.c                   Shubham
+│   ├── client.c                      Shubham   CLI (interactive and -f script mode)
+│   ├── log.c                         Shubham
+│   ├── server.c                      Shwetank  FIFO listener, session table, main()
+│   ├── threadpool.c                  Shwetank  bounded queue, worker threads
+│   ├── dispatcher.c                  Shwetank  command to handler, lock choice, replies
+│   ├── rwlock.c                      Shwetank  per-file readers-writers locks
+│   ├── cache.c                       Shwetank  LRU cache, write-back
+│   ├── sched.c                       Aarush    request queue, FCFS / SCAN / C-SCAN
+│   ├── waitfor.c                     Aarush    wait-for graph, detector, recovery
+│   └── bench.c                       Aarush    comparison module
+│
+├── tests/
+│   ├── mock_disk.c                   Aarush    fake disk_raw_*; Shwetank reuses it for cache tests
+│   ├── test_fs.c                     Arjun
+│   ├── test_client_parse.c           Shubham
+│   ├── dummy_server.c                Shubham   canned-reply server for testing the client alone
+│   ├── test_queue.c                  Shwetank
+│   ├── test_rwlock.c                 Shwetank
+│   ├── test_cache.c                  Shwetank
+│   ├── test_sched.c                  Aarush
+│   └── test_deadlock.c               Aarush
+│
+├── scripts/
+│   ├── basic_ops.sh                  Shubham
+│   ├── multi_client.sh               Shubham
+│   ├── check_fifos.sh                Shubham
+│   ├── race_demo.sh                  Shubham + Aarush
+│   ├── deadlock_demo.sh              Shubham + Aarush
+│   └── run_bench.sh                  Shubham + Aarush
+│
+├── docs/
+│   ├── protocol.md                   Shubham
+│   ├── demo.md                       Shubham   exact demo commands and expected output
+│   ├── screenshots/                  Shubham
+│   ├── results/
+│   │   ├── fragmentation.csv         Arjun
+│   │   ├── cache_hit_ratio.csv       Shwetank
+│   │   ├── worker_tuning.csv         Shwetank
+│   │   ├── bench_results.csv         Aarush
+│   │   ├── head_movement.png         Aarush
+│   │   ├── hit_ratio_latency.png     Aarush
+│   │   └── detector_modes.txt        Aarush
+│   └── report/
+│       ├── cli_ipc_section.md        Shubham
+│       ├── storage_section.md        Arjun
+│       ├── server_sync_cache_section.md   Shwetank
+│       ├── deadlock_scheduling_section.md Aarush
+│       └── final_report             Shubham   assembled from the four sections
+│
+├── logs/                             generated: server.log (not committed)
+├── bin/                              generated: server, client, test binaries (not committed)
+└── disk.img                          generated: the simulated disk (not committed)

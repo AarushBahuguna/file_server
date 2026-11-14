@@ -1,0 +1,261 @@
+AARUSH BAHUGUNA - WORKING PLAN
+Deadlock & Disk-Scheduling Lead
+Project: Multi-User File System with Concurrent Access (10-day plan)
+=====================================================================
+
+
+1. FILE STRUCTURE FOR YOUR PART
+---------------------------------------------------------------------
+
+os-project/
+|-- include/
+|   |-- sched.h              scheduler API (disk_req struct, sched_submit, sched_set_policy, sched_stats)
+|   `-- waitfor.h            wait-for graph API (wfg_on_wait, wfg_on_grant, wfg_on_release, wfg_detect, wfg_dump)
+|
+|-- src/
+|   |-- sched.c              request queue, scheduler thread, FCFS / SCAN / C-SCAN, head-movement counters
+|   |-- waitfor.c            lock-table view, wait-for graph, cycle detection, victim selection, recovery
+|   `-- bench.c              comparison module (policy x cache on/off), prints table and writes CSV
+|
+|-- tests/
+|   |-- mock_disk.c          fake disk_raw_read/write so you can test without Arjun's code
+|   |-- test_sched.c         scheduler unit tests (textbook example, exactly-once service)
+|   `-- test_deadlock.c      deadlock unit tests (2-cycle, 3-cycle, chain, repeated runs)
+|
+|-- scripts/                 (written together with Shubham)
+|   |-- race_demo.sh         two writers, no-locks mode vs locked mode
+|   |-- deadlock_demo.sh     two clients using lock2 in opposite order
+|   `-- run_bench.sh         runs bench for every configuration, 5 runs each
+|
+`-- docs/
+    |-- results/
+    |   |-- bench_results.csv
+    |   |-- head_movement.png
+    |   |-- hit_ratio_latency.png
+    |   `-- detector_modes.txt   on-request vs periodic detection delay notes
+    `-- deadlock_scheduling_section.md   your report section
+
+Files you touch but do not own (small, agreed changes only):
+  src/rwlock.c    Shwetank. Calls your wfg_* hooks and supports abortable wait.
+  src/cache.c     Shwetank. Calls your sched_submit on a miss or dirty eviction.
+  src/disk.c      Arjun. Provides disk_raw_read/write that your scheduler thread calls.
+  src/log.c       Shubham. You call log_event for every deadlock event.
+
+
+2. HOW I WILL GO ABOUT YOUR WORK
+---------------------------------------------------------------------
+
+2.1 Guiding approach
+
+  - Build bottom-up and test each piece alone before it meets anyone else's code.
+    The scheduler is tested with a mock disk, the detector with plain threads.
+  - Write the tests from known answers first. The scheduler has textbook numbers
+    (FCFS 640, SCAN 236, C-SCAN 382), so the tests exist before the algorithms do.
+  - Keep the decision logic separate from the threading. The "which request is next"
+    code is a plain function with no locks, so it can be checked by hand and by test.
+  - Keep each module small and behind its header, so the integration on Day 7 is
+    wiring, not rewriting.
+
+2.2 Day by day
+
+DAY 1 - Contracts
+  1. Write include/sched.h:
+       struct disk_req { int block; int is_write; void *buf; sem_t done; int status; };
+       int  sched_submit(struct disk_req *r);       blocks until serviced
+       void sched_set_policy(int policy);           FCFS | SCAN | CSCAN
+       void sched_stats(struct sched_stats *out);
+  2. Write include/waitfor.h with the four hooks and wfg_dump.
+  3. Agree with Shwetank on exactly where in rwlock.c each hook is called, and that
+     the wait must be abortable (timed wait or condition variable with an abort flag).
+  4. Agree the graph nodes: one node per session; edge = waiter -> current holder.
+  Output: two headers committed. Nothing else is blocked on you after this.
+
+DAY 2 - Request queue and FCFS
+  1. tests/mock_disk.c: disk_raw_read/write that only record the block number.
+  2. Request queue: linked list, one mutex, one counting semaphore of pending requests.
+  3. Scheduler thread loop:
+       wait for a pending request -> pick one by policy -> call disk_raw_* ->
+       head_movement += abs(head - block); head = block -> sem_post(done).
+  4. Implement FCFS only. Pick = head of the list.
+  5. Counters: requests served, total head movement, total wait time.
+  Watch for: the caller's request lives on the caller's stack, so the scheduler must
+  not touch it after sem_post(done).
+  Done when: 20 requests are served in arrival order and the movement total matches
+  a hand calculation.
+
+DAY 3 - SCAN and C-SCAN
+  1. Write pick_next(queue, head, direction, policy) as a pure function.
+  2. SCAN: serve the nearest request in the current direction; at the end of the
+     disk, reverse direction. Treat the disk ends as real stops (0 and 199 in the test).
+  3. C-SCAN: sweep one way only; after the last request, jump back to the start and
+     continue. Count the return jump in head movement and write that choice down in
+     the report so the numbers are interpretable.
+  4. Add a batch window (collect for a few ms) or a simulated seek delay
+     (usleep proportional to distance). Without one, requests arrive one at a time,
+     the queue holds one item, and all three policies give identical results.
+  5. Write test_sched.c using the textbook example (head 53, queue 98 183 37 122 14
+     124 65 67, disk 0..199):
+       FCFS  -> 640
+       SCAN  (moving down first) -> 236
+       C-SCAN (moving up)        -> 382
+  Done when: the three expected numbers pass.
+
+DAY 4 - Wait-for graph data structure
+  1. Adjacency matrix, about 64 x 64 sessions, one graph mutex.
+  2. wfg_on_wait(waiter, file): add an edge from waiter to every session currently
+     holding that file's lock. Skip self-edges.
+  3. wfg_on_grant and wfg_on_release: remove the matching edges, so the graph never
+     holds stale edges.
+  4. wfg_dump: print the graph in readable form for debugging and the report.
+  5. Write the lock ordering down: the graph mutex is never held while calling into
+     the lock manager, and the lock manager never calls a hook while holding its own
+     mutex in a way that could block on the graph mutex in reverse order.
+  Done when: a hand-built scenario (A holds F1, B holds F2, A waits F2) gives the
+  edge A -> B and nothing else.
+
+DAY 5 - Detection and recovery
+  1. Cycle detection: DFS with white / gray / black colours. A back edge to a gray
+     node means a cycle; record the cycle path.
+       On-request mode: start the DFS only from the session that just began waiting
+       (cheap, catches the deadlock the moment it forms).
+       Periodic mode: scan every node, run from a background thread about once per
+       second, behind a flag.
+  2. Victim selection: the youngest session in the cycle (least work lost). Keep it
+     as one small function so the policy can be swapped.
+  3. Recovery:
+       a. mark the victim aborted;
+       b. wake it through Shwetank's abort mechanism;
+       c. release all locks it holds, which also removes its graph edges;
+       d. return -EDEADLK to its client.
+     To make rollback safe, a multi-lock operation buffers its writes until all
+     locks are held, so aborting just discards the buffer.
+  4. Counter for deadlocks detected, and a log_event line for each one that names
+     the cycle and the victim.
+  Done when: a forced two-session deadlock is detected, one session aborted, the
+  other completes.
+
+DAY 6 - Unit tests (checkpoint)
+  test_sched.c
+    - textbook example for all three policies (640 / 236 / 382)
+    - random workload: every request served exactly once, none lost, none doubled
+  test_deadlock.c
+    - two threads, A then B versus B then A, with sleeps to force the interleaving
+    - three-session cycle
+    - long wait chain with no cycle (must NOT be reported: no false positives)
+    - run the whole file 100 times to expose timing-dependent failures
+  Done when: everything passes 100 runs in a row.
+
+DAY 7 - Integration (pair with Arjun and Shwetank)
+  1. Plug the scheduler under the cache: miss or dirty eviction calls sched_submit,
+     the scheduler thread calls disk_raw_*.
+  2. Hook the detector into the lock request path with Shwetank. Confirm that an
+     abort really wakes a blocked worker thread.
+  3. Re-run test_sched.c and test_deadlock.c through the full stack.
+  Done when: a file write travels cache -> scheduler -> disk and the head movement
+  counter changes.
+
+DAY 8 - Scenarios and comparison module
+  1. Race scenario: add a no-locks mode to the server. Run two writers on one file
+     and show inconsistent data. Turn locking on and show the data is consistent.
+  2. Deadlock scenario: Shubham's lock2 script, two clients, opposite order. Capture
+     the log showing the cycle, the victim and the recovery.
+  3. Compare on-request and periodic detection and record the detection delay.
+  4. bench.c: random block requests from several clients, run under FCFS, SCAN and
+     C-SCAN, each with the cache on and off. Print total head movement, average
+     latency, throughput and hit ratio, and write CSV.
+  5. Run every configuration 5 times with fixed random seeds and average the runs.
+  Done when: bench produces a complete table and CSV that anyone can reproduce.
+
+DAY 9 - Results and report
+  1. Turn the CSV into graphs (head movement per policy; hit ratio and latency with
+     and without the cache).
+  2. Write docs/deadlock_scheduling_section.md:
+       - wait-for graph example figure and explanation
+       - detection pseudocode, victim policy, recovery
+       - race versus locked results
+       - comparison table and a short analysis (why SCAN and C-SCAN beat FCFS,
+         what the cache changes, what the batch window did)
+  3. Send the figures to Shubham for the final report.
+
+DAY 10 - Demos and slides
+  1. Rehearse the deadlock demo: start, deadlock forms, cycle detected, victim
+     aborted, other client finishes.
+  2. Rehearse the performance demo: same workload under FCFS, SCAN, C-SCAN; show
+     head movement and hit ratio.
+  3. Prepare slides: problem, architecture, demo flow, results.
+  4. Prepare short answers for likely questions (list in section 4).
+  Done when: both demos run three times in a row without surprises.
+
+
+3. DESIGN DECISIONS AND WHY
+---------------------------------------------------------------------
+
+  Pure pick_next function     Easy to test by hand against the textbook numbers, and
+                              the algorithm is separate from the locking.
+  Graph edge = waiter->holder Matches the standard wait-for graph definition, so the
+                              report can use the textbook cycle argument directly.
+  One graph mutex             The graph is small; one lock is simpler and safer than
+                              fine-grained locking.
+  Youngest-victim policy      Least work thrown away, and easy to explain.
+  Buffered writes             Makes rollback trivial: discard the buffer, no undo log.
+  Count the C-SCAN return     Matches the textbook total (382), keeps numbers comparable.
+  Fixed seeds, 5 runs         Results are reproducible and not driven by one lucky run.
+  Batch window / seek delay   Needed so the queue actually holds several requests.
+
+
+4. THINGS THAT CAN GO WRONG
+---------------------------------------------------------------------
+
+  1. Queue is always empty, so FCFS = SCAN = C-SCAN.
+       Fix: batch window or simulated seek delay (Day 3).
+  2. Stale edges in the graph cause false deadlocks.
+       Fix: remove edges in wfg_on_grant and wfg_on_release; add a test that checks
+       the graph is empty after all locks are released.
+  3. Race between "start waiting" and "lock granted" so an edge is added after the
+     grant and never removed.
+       Fix: call wfg_on_wait while the lock manager still holds its state mutex, and
+       re-check the grant inside the same critical section.
+  4. Shared (reader) locks have several holders. A waiting writer needs an edge to
+     every holder; a reader must never get an edge to itself.
+  5. Lock upgrade (read lock then write lock on the same file) deadlocks one session
+     against itself. Decide with Shwetank whether to forbid upgrades.
+  6. A woken victim keeps running with stale lock state.
+       Fix: the abort flag is checked right after every wake-up, and all of the
+       victim's locks are released before the error is returned.
+  7. The scheduler thread touches a request after sem_post, and the caller has
+     already returned. Fix: the scheduler reads everything it needs before posting.
+  8. Lost wake-ups on the pending-request semaphore. Fix: only post once per queued
+     request and never test the count directly.
+  9. Real deadlock outside the detector (a mutex ordering mistake). Fix: follow the
+     shared ordering rule - file lock, FS metadata mutex, cache mutex, scheduler
+     queue mutex - and run test code under ThreadSanitizer.
+
+
+5. QUESTIONS TO SETTLE WITH THE TEAM EARLY
+---------------------------------------------------------------------
+
+  With Shwetank (Day 1 to Day 3):
+    - How is a blocked lock request woken early? (timed wait or condition variable)
+    - Are lock upgrades allowed?
+    - Which call point exactly for each wfg_* hook?
+  With Shubham (Day 7 to Day 8):
+    - Is the lock2 hold time given in milliseconds?
+    - Where should the detector's log lines appear so they show up in the demo?
+  With Arjun (Day 7):
+    - Does disk_raw_* need any lock of its own, or is the scheduler thread the
+      only caller?
+
+
+6. DEFINITION OF DONE FOR YOUR PART
+---------------------------------------------------------------------
+
+  [ ] FCFS, SCAN and C-SCAN produce 640 / 236 / 382 on the textbook example
+  [ ] Every request is served exactly once under load
+  [ ] Two-session and three-session deadlocks are detected and recovered
+  [ ] No false positive on a wait chain, and the graph is empty after all locks release
+  [ ] Detector works in on-request mode, and periodic mode if time allows
+  [ ] Race demo shows corruption without locks and consistency with locks
+  [ ] bench produces CSV and a table for all 6 configurations (3 policies x cache on/off)
+  [ ] Graphs and the report section are written
+  [ ] Both demos rehearsed three times in a row
+  [ ] Branch merged to main with tests passing
