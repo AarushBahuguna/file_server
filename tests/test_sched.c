@@ -23,6 +23,87 @@ static int check_fcfs(int *blocks, int count)
     return (int)expected_movement;
 }
 
+static long simulate_policy_total(int policy, int head, int *queue, int count, int direction)
+{
+    int remaining[32];
+    int remaining_count = count;
+    int i;
+    int current_head = head;
+    int current_direction = direction;
+    long total_movement = 0;
+
+    for (i = 0; i < count; i++) {
+        remaining[i] = queue[i];
+    }
+
+    while (remaining_count > 0) {
+        int next_block = -1;
+        int has_candidate = 0;
+
+        if (sched_pick_next(remaining, remaining_count, current_head, current_direction, policy, &next_block) != 0) {
+            fprintf(stderr, "sched_pick_next failed for policy %d\n", policy);
+            return -1;
+        }
+
+        if (policy == SCHED_CSCAN) {
+            int j;
+            int has_forward = 0;
+            int has_backward = 0;
+            for (j = 0; j < remaining_count; j++) {
+                if (remaining[j] >= current_head) {
+                    has_forward = 1;
+                }
+                if (remaining[j] <= current_head) {
+                    has_backward = 1;
+                }
+            }
+
+            if (current_direction > 0 && !has_forward) {
+                total_movement += (199 - current_head) + 199;
+                current_head = 0;
+            } else if (current_direction < 0 && !has_backward) {
+                total_movement += current_head + 199;
+                current_head = 199;
+            }
+        } else if (policy == SCHED_SCAN) {
+            int j;
+            int old_direction = current_direction;
+            for (j = 0; j < remaining_count; j++) {
+                if ((current_direction > 0 && remaining[j] >= current_head) ||
+                    (current_direction < 0 && remaining[j] <= current_head)) {
+                    has_candidate = 1;
+                    break;
+                }
+            }
+            if (!has_candidate) {
+                if (old_direction < 0) {
+                    total_movement += current_head - 0;
+                    current_head = 0;
+                } else {
+                    total_movement += 199 - current_head;
+                    current_head = 199;
+                }
+                current_direction *= -1;
+            }
+        }
+
+        total_movement += abs(current_head - next_block);
+        current_head = next_block;
+
+        for (i = 0; i < remaining_count; i++) {
+            if (remaining[i] == next_block) {
+                for (int j = i; j + 1 < remaining_count; j++) {
+                    remaining[j] = remaining[j + 1];
+                }
+                remaining_count--;
+                break;
+            }
+        }
+    }
+
+    return total_movement;
+}
+
 int main(void)
 {
     const int count = 20;
@@ -31,6 +112,7 @@ int main(void)
     int blocks[count];
     int i;
     long expected_total = 0;
+    int textbook[] = {98, 183, 37, 122, 14, 124, 65, 67};
 
     sched_init();
 
@@ -73,5 +155,23 @@ int main(void)
 
     sched_shutdown();
     puts("scheduler fcfs test passed");
+
+    if (simulate_policy_total(SCHED_FCFS, 53, textbook, 8, 1) != 640) {
+        fprintf(stderr, "FCFS textbook example failed\n");
+        return 1;
+    }
+    puts("scheduler fcfs textbook case passed");
+
+    if (simulate_policy_total(SCHED_SCAN, 53, textbook, 8, -1) != 236) {
+        fprintf(stderr, "SCAN textbook example failed\n");
+        return 1;
+    }
+    puts("scheduler scan textbook case passed");
+
+    if (simulate_policy_total(SCHED_CSCAN, 53, textbook, 8, 1) != 382) {
+        fprintf(stderr, "C-SCAN textbook example failed\n");
+        return 1;
+    }
+    puts("scheduler cscan textbook case passed");
     return 0;
 }

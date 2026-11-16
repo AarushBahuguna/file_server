@@ -110,6 +110,24 @@ int sched_submit(struct disk_req *r);
 void sched_set_policy(int policy);
 
 /* ---------------------------------------------------------------
+ * sched_set_head — set the initial disk head position
+ *
+ * Used by scheduler tests and simulations that start from a specific
+ * head offset, such as the Day 3 textbook example that starts at 53.
+ * --------------------------------------------------------------- */
+void sched_set_head(int head);
+
+/* ---------------------------------------------------------------
+ * sched_pick_next — choose the next request for a given policy
+ *
+ * This helper implements the pure selection logic used by the
+ * scheduler, without touching the queue or any locks.  It is useful
+ * for deterministic unit tests of the Day 3 textbook example.
+ * --------------------------------------------------------------- */
+int sched_pick_next(const int *queue, int count, int head, int direction,
+                   int policy, int *selected_block);
+
+/* ---------------------------------------------------------------
  * sched_stats — read current performance counters
  *
  * Copies the scheduler's internal counters into *out.  This is safe
