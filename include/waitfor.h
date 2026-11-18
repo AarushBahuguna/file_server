@@ -133,4 +133,10 @@ void wfg_dump(void);
  * --------------------------------------------------------------- */
 void wfg_destroy(void);
 
+/* Day 5 recovery helpers used independently of the team lock manager. */
+int wfg_recover_victim(int victim);
+int wfg_is_aborted(int session);
+void wfg_reset_abort(int session);
+void wfg_stats(unsigned int *detections, unsigned int *deadlocks);
+
 #endif /* WAITFOR_H */

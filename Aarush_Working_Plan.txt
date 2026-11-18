@@ -1,4 +1,4 @@
-AARUSH BAHUGUNA - WORKING PLAN
+oAARUSH BAHUGUNA - WORKING PLAN
 Deadlock & Disk-Scheduling Lead
 Project: Multi-User File System with Concurrent Access (10-day plan)
 =====================================================================
