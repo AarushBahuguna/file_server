@@ -1,7 +1,30 @@
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
+#include <unistd.h>
 
 #include "waitfor.h"
+
+struct thread_order_args {
+    int first_waiter;
+    int first_holder;
+    int second_waiter;
+    int second_holder;
+};
+
+static void *opposite_order_thread(void *arg)
+{
+    struct thread_order_args *order = (struct thread_order_args *)arg;
+    int holders[1];
+
+    holders[0] = order->first_holder;
+    wfg_on_wait(order->first_waiter, order->first_waiter + 100, holders, 1);
+    usleep(500);
+
+    holders[0] = order->second_holder;
+    wfg_on_wait(order->second_waiter, order->second_waiter + 100, holders, 1);
+    return NULL;
+}
 
 static int fail(const char *message)
 {
@@ -179,6 +202,36 @@ static int test_stats(void)
     return 0;
 }
 
+static int test_opposite_thread_orders(void)
+{
+    pthread_t first_thread;
+    pthread_t second_thread;
+    struct thread_order_args first = {0, 1, 1, 0};
+    struct thread_order_args second = {1, 0, 0, 1};
+    int cycle[MAX_SESSIONS];
+    int cycle_len = 0;
+
+    wfg_init();
+
+    if (pthread_create(&first_thread, NULL, opposite_order_thread, &first) != 0) {
+        return fail("could not create first deadlock thread");
+    }
+    usleep(100);
+    if (pthread_create(&second_thread, NULL, opposite_order_thread, &second) != 0) {
+        return fail("could not create second deadlock thread");
+    }
+
+    pthread_join(first_thread, NULL);
+    pthread_join(second_thread, NULL);
+
+    if (wfg_detect(-1, cycle, &cycle_len) != 1) {
+        return fail("opposite-thread two-cycle was not detected");
+    }
+
+    wfg_destroy();
+    return 0;
+}
+
 int main(void)
 {
     if (test_empty_graph() != 0) {
@@ -200,6 +253,9 @@ int main(void)
         return 1;
     }
     if (test_stats() != 0) {
+        return 1;
+    }
+    if (test_opposite_thread_orders() != 0) {
         return 1;
     }
 
