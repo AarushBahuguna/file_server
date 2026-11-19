@@ -8,6 +8,9 @@ extern int mock_last_block;
 extern int mock_last_op;
 extern int mock_read_count;
 extern int mock_write_count;
+extern void mock_reset_blocks(void);
+extern int mock_block_read_count(int block);
+extern int mock_block_write_count(int block);
 
 static int check_fcfs(int *blocks, int count)
 {
@@ -21,6 +24,67 @@ static int check_fcfs(int *blocks, int count)
     }
 
     return (int)expected_movement;
+}
+
+static int test_random_workload(int policy)
+{
+    enum { RANDOM_COUNT = 200 };
+    struct disk_req reqs[RANDOM_COUNT];
+    struct sched_stats stats;
+    int i;
+
+    mock_read_count = 0;
+    mock_write_count = 0;
+    mock_reset_blocks();
+
+    sched_init();
+    sched_set_head(53);
+    sched_set_policy(policy);
+    srand(0xD3A6 + policy);
+
+    for (i = 0; i < RANDOM_COUNT; i++) {
+        reqs[i].block = rand() % 200;
+        reqs[i].is_write = (i % 3 == 0);
+        reqs[i].buf = NULL;
+        reqs[i].status = -1;
+        sem_init(&reqs[i].done, 0, 0);
+
+        if (sched_submit(&reqs[i]) != 0) {
+            sched_shutdown();
+            fprintf(stderr, "random request %d was lost\n", i);
+            return 1;
+        }
+
+        if (reqs[i].status != 0) {
+            sched_shutdown();
+            fprintf(stderr, "random request %d completed incorrectly\n", i);
+            return 1;
+        }
+
+        if (mock_block_read_count(reqs[i].block) + mock_block_write_count(reqs[i].block) < 1) {
+            sched_shutdown();
+            fprintf(stderr, "random request %d was not served by the mock disk\n", i);
+            return 1;
+        }
+    }
+
+    sched_stats(&stats);
+    if (stats.requests_served != RANDOM_COUNT) {
+        sched_shutdown();
+        fprintf(stderr, "random workload served %d of %d requests\n",
+                stats.requests_served, RANDOM_COUNT);
+        return 1;
+    }
+
+    if (mock_read_count + mock_write_count != RANDOM_COUNT) {
+        sched_shutdown();
+        fprintf(stderr, "random workload issued %d of %d disk operations\n",
+                mock_read_count + mock_write_count, RANDOM_COUNT);
+        return 1;
+    }
+
+    sched_shutdown();
+    return 0;
 }
 
 static long simulate_policy_total(int policy, int head, int *queue, int count, int direction)
@@ -173,5 +237,20 @@ int main(void)
         return 1;
     }
     puts("scheduler cscan textbook case passed");
+
+    if (test_random_workload(SCHED_FCFS) != 0) {
+        return 1;
+    }
+    puts("scheduler fcfs random workload passed");
+
+    if (test_random_workload(SCHED_SCAN) != 0) {
+        return 1;
+    }
+    puts("scheduler scan random workload passed");
+
+    if (test_random_workload(SCHED_CSCAN) != 0) {
+        return 1;
+    }
+    puts("scheduler cscan random workload passed");
     return 0;
 }
