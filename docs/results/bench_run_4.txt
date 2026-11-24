@@ -1,0 +1,6 @@
+FCFS cache=off average: movement=68141 latency_us=681 throughput=1467 hit_ratio=0%
+FCFS cache=on average: movement=68141 latency_us=681 throughput=1466 hit_ratio=30%
+SCAN cache=off average: movement=252 latency_us=2 throughput=396825 hit_ratio=0%
+SCAN cache=on average: movement=252 latency_us=3 throughput=318311 hit_ratio=30%
+C-SCAN cache=off average: movement=397 latency_us=3 throughput=251889 hit_ratio=0%
+C-SCAN cache=on average: movement=397 latency_us=4 throughput=217789 hit_ratio=30%
