@@ -3,6 +3,7 @@
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <unistd.h>
 #include <sys/stat.h>
 
@@ -64,6 +65,9 @@ void ipc_server_close(int server_fd) {
 /* ================= client ================= */
 static char g_reply_name[CLIENT_FIFO_MAX];
 static int  g_reply_fd = -1;     /* opened O_RDWR so it never blocks / sees EOF */
+static int  g_timeout_ms = 30000;
+
+void ipc_set_timeout(int ms) { g_timeout_ms = ms; }
 
 int ipc_client_init(void) {
     client_fifo_name(getpid(), g_reply_name, sizeof g_reply_name);
@@ -77,14 +81,21 @@ int ipc_client_init(void) {
 int ipc_call(request_t *req, response_t *resp) {
     req->client_pid = getpid();
     int sfd = open(SERVER_FIFO, O_WRONLY | O_NONBLOCK);
-    if (sfd < 0) {
-        fprintf(stderr, "cannot reach server (%s): is it running?\n", strerror(errno));
-        return -1;
-    }
+    if (sfd < 0) return -1;                       /* errno: ENOENT / ENXIO = server not running */
     int rc = write_full(sfd, req, sizeof *req);   /* single atomic write */
+    int saved = errno;
     close(sfd);
-    if (rc < 0) return -1;
-    return read_full(g_reply_fd, resp, sizeof *resp) == 1 ? 0 : -1;
+    if (rc < 0) { errno = saved; return -1; }
+
+    for (;;) {
+        struct pollfd p = { .fd = g_reply_fd, .events = POLLIN };
+        int pr = poll(&p, 1, g_timeout_ms > 0 ? g_timeout_ms : -1);
+        if (pr == 0) { errno = ETIMEDOUT; return -1; }
+        if (pr < 0) return -1;                    /* EINTR on Ctrl-C */
+        if (read_full(g_reply_fd, resp, sizeof *resp) != 1) return -1;
+        if (resp->req_id == req->req_id) return 0;
+        /* otherwise: late reply to an earlier request that timed out; drop it */
+    }
 }
 
 void ipc_client_close(void) {

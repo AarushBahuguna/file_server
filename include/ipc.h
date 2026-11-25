@@ -11,7 +11,10 @@ void ipc_server_close(int server_fd);
 
 /* ---- client side ---- */
 int ipc_client_init(void);                       /* creates own reply FIFO; returns 0 or -1 */
-int ipc_call(request_t *req, response_t *resp);  /* send + wait for reply; 0 ok, -1 error */
+void ipc_set_timeout(int ms);                    /* how long ipc_call waits for a reply; <=0 = forever (default 30000) */
+/* send + wait for the reply with the same req_id (stale replies are skipped).
+ * 0 ok, -1 error with errno: ETIMEDOUT (no reply), EINTR (signal), ENOENT/ENXIO (server not running) */
+int ipc_call(request_t *req, response_t *resp);
 void ipc_client_close(void);
 
 #endif

@@ -2,7 +2,7 @@
 CC      = gcc
 CFLAGS  = -Wall -Wextra -g -pthread -Iinclude
 LDFLAGS = -pthread
-COMMON  = src/common/ipc.c src/common/protocol.c
+COMMON  = src/common/ipc.c src/common/protocol.c src/common/log.c src/common/session.c
 
 .PHONY: all test clean
 
@@ -50,3 +50,21 @@ bin/dummy_server: tests/dummy_server.c $(COMMON)
 cli-test: bin/test_parse bin/dummy_server bin/client bin/echo_client
 	./bin/test_parse
 	./scripts/test_cli.sh
+
+# ---- Shubham: Day 4 (log + session) ----
+bin/test_session: tests/test_session.c src/common/session.c
+	@mkdir -p bin
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+bin/test_log: tests/test_log.c src/common/log.c src/common/protocol.c
+	@mkdir -p bin
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+unit-test: bin/test_protocol bin/test_parse bin/test_session bin/test_log
+	./bin/test_protocol
+	./bin/test_parse
+	./bin/test_session
+	./bin/test_log
+
+check: unit-test echo-test cli-test
+	@echo ALL CHECKS PASSED
