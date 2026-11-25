@@ -68,3 +68,8 @@ unit-test: bin/test_protocol bin/test_parse bin/test_session bin/test_log
 
 check: unit-test echo-test cli-test
 	@echo ALL CHECKS PASSED
+
+# ---- Shubham: Day 5 stats formatter tests ----
+.PHONY: stats-test
+stats-test:
+	./tests/test_stats.sh
