@@ -25,3 +25,15 @@ test: bin/test_protocol
 
 clean:
 	rm -rf bin
+
+# ---- Shubham: Day 2 echo test ----
+bin/echo_server: tests/echo_server.c $(COMMON)
+	@mkdir -p bin
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+bin/echo_client: tests/echo_client.c $(COMMON)
+	@mkdir -p bin
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+echo-test: bin/echo_server bin/echo_client
+	./scripts/test_echo.sh
