@@ -249,13 +249,13 @@ DAY 10 - Demos and slides
 6. DEFINITION OF DONE FOR YOUR PART
 ---------------------------------------------------------------------
 
-  [ ] FCFS, SCAN and C-SCAN produce 640 / 236 / 382 on the textbook example
-  [ ] Every request is served exactly once under load
-  [ ] Two-session and three-session deadlocks are detected and recovered
-  [ ] No false positive on a wait chain, and the graph is empty after all locks release
-  [ ] Detector works in on-request mode, and periodic mode if time allows
-  [ ] Race demo shows corruption without locks and consistency with locks
-  [ ] bench produces CSV and a table for all 6 configurations (3 policies x cache on/off)
-  [ ] Graphs and the report section are written
-  [ ] Both demos rehearsed three times in a row
+  [x] FCFS, SCAN and C-SCAN produce 640 / 236 / 382 on the textbook example
+  [x] Every request is served exactly once under load
+  [x] Two-session and three-session deadlocks are detected and recovered
+  [x] No false positive on a wait chain, and the graph is empty after all locks release
+  [x] Detector works in on-request mode, and periodic mode if time allows
+  [x] Race demo shows corruption without locks and consistency with locks
+  [x] bench produces CSV and a table for all 6 configurations (3 policies x cache on/off)
+  [x] Graphs and the report section are written
+  [x] Both demos rehearsed three times in a row
   [ ] Branch merged to main with tests passing
