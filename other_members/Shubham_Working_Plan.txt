@@ -1,0 +1,233 @@
+SHUBHAM GUPTA - WORKING PLAN
+Client & Tooling Lead
+Project: Multi-User File System with Concurrent Access (10-day plan)
+=====================================================================
+
+
+1. FILE STRUCTURE FOR YOUR PART
+---------------------------------------------------------------------
+
+os-project/
+|-- Makefile                 targets: all, server, client, tests, clean
+|-- README.md                build, run, commands, tests
+|-- .gitignore               disk.img, logs/, binaries, *.o
+|
+|-- include/
+|   |-- protocol.h           command names, error codes, FIFO paths, limits
+|   |-- fifo_util.h          FIFO helper API
+|   |-- session.h            session struct shared with the server
+|   `-- log.h                log_event API
+|
+|-- src/
+|   |-- fifo_util.c          mkfifo, open, send_line, recv_line, cleanup
+|   |-- client.c             CLI: parsing, request building, reply printing, script mode
+|   `-- log.c                thread-safe logger
+|
+|-- tests/
+|   |-- test_client_parse.c  CLI parser tests
+|   `-- dummy_server.c       canned-reply server for testing the client alone
+|
+|-- scripts/
+|   |-- basic_ops.sh         create/write/read/mkdir/ls/delete with expected output
+|   |-- multi_client.sh      N background clients, collect exit codes
+|   |-- deadlock_demo.sh     two clients, lock2, opposite order (with Aarush)
+|   |-- race_demo.sh         two writers, no-locks vs locked (with Aarush)
+|   |-- run_bench.sh         bench runs (with Aarush)
+|   `-- check_fifos.sh       reports leftover /tmp/fs_* FIFOs
+|
+|-- logs/                    server.log (not committed)
+|
+`-- docs/
+    |-- protocol.md          request/response format, error codes, command list
+    |-- demo.md              exact demo commands and expected output
+    |-- screenshots/         normal session, deadlock demo, stats output
+    `-- report/              final report: assembled from all four sections
+
+Files you touch but do not own (small, agreed changes only):
+  src/server.c       Shwetank. Uses your fifo_util and your session struct.
+  src/dispatcher.c   Shwetank. Parses the protocol lines you define.
+  src/waitfor.c      Aarush. Calls your log_event.
+
+
+2. HOW I WILL GO ABOUT YOUR WORK
+---------------------------------------------------------------------
+
+2.1 Guiding approach
+
+  - Your work is what lets everyone else test. Build tooling first and keep it
+    reliable: a Makefile that always works, a client that never leaves junk behind,
+    scripts that can be repeated.
+  - Define the protocol once, in writing, on Day 1. Every other module parses it,
+    so a late change costs the whole team.
+  - Test the client alone with a dummy server, so client bugs are never confused
+    with server bugs.
+  - Every failure found later becomes a short repro written down and handed to its
+    owner, not a vague complaint.
+
+2.2 Day by day
+
+DAY 1 - Repo, Makefile, protocol
+  1. Create the Git repo with src/, include/, tests/, scripts/, docs/, logs/.
+  2. Makefile: targets all, server, client, tests, clean; flags -Wall -Wextra -g
+     -pthread; automatic header dependencies (-MMD -MP) so a changed header
+     rebuilds what includes it; one target per test binary.
+  3. docs/protocol.md:
+       request  : <session_id> <user> <command> [args]\n
+       response : OK [data]\n   or   ERR <code> <message>\n
+       commands : create open read write delete ls mkdir cd pwd report stats sync
+                  exit, and the test-only lock2 <fileA> <fileB> <hold_ms>
+       limits   : one line per request, under 512 bytes
+       paths    : server FIFO /tmp/fs_req, reply FIFO /tmp/fs_resp_<session_id>
+  4. Create one branch per person and share the merge rules.
+  Done when: everyone can clone, run make, and get a clean (empty) build.
+
+DAY 2 - FIFO helpers and echo client
+  1. fifo_util:
+       - create the server FIFO with mkfifo
+       - create and unlink a per-client reply FIFO
+       - send_line and recv_line with newline framing, a maximum length, and
+         EINTR handling
+  2. Echo client: sends one line, prints the reply.
+  3. At the end of the day, test against Shwetank's server skeleton together.
+  Watch for: opening a FIFO O_WRONLY blocks until a reader exists. The client must
+  open the reply FIFO for reading before sending the request, or the reply is lost.
+  Done when: the echo client round-trips a line through the real server FIFO.
+
+DAY 3 - CLI client
+  1. ./client <username> reads commands in a loop, validates argument counts,
+     builds the protocol line, sends it, prints the reply.
+  2. Support: create open read write delete ls mkdir cd pwd report stats sync exit
+     and lock2.
+  3. Script mode: ./client <user> -f commands.txt runs a file of commands without
+     prompting. Every shell test depends on this.
+  4. Handle write data that contains spaces; reject lines that are too long with a
+     clear message instead of sending a broken request.
+  Done when: each command produces a correctly formatted request line.
+
+DAY 4 - Logger and sessions
+  1. log.c: log_event(level, session, fmt, ...) with a mutex, timestamp, level,
+     session id and message, appended to logs/server.log.
+  2. Map error codes to readable messages in the client (-ENOENT prints "no such
+     file or directory", -EDEADLK prints "aborted: deadlock victim, retry").
+  3. Sessions: the client generates its session id (use its pid), sends HELLO <user>
+     at start and BYE at exit. Give Shwetank include/session.h for the server's
+     session table.
+  Done when: 8 threads logging at once produce no interleaved or broken lines.
+
+DAY 5 - Stats output and basic scripts
+  1. Format the STATS response into a readable table: cache hit ratio, total head
+     movement, deadlocks detected, scheduler policy, requests served.
+  2. scripts/basic_ops.sh: create, write, read, mkdir, ls, delete in sequence,
+     comparing output with the expected text.
+  3. scripts/multi_client.sh: start N clients in the background, each running its
+     own command file, wait for all, and report any non-zero exit code.
+  Done when: basic_ops.sh passes against the dummy server.
+
+DAY 6 - Unit tests (checkpoint)
+  1. test_client_parse.c: valid commands, missing arguments, extra arguments,
+     overlong lines, empty lines.
+  2. dummy_server.c returns canned replies; run the full client against it.
+  3. Trap SIGINT and SIGTERM so the reply FIFO is always unlinked.
+  4. scripts/check_fifos.sh: lists leftover /tmp/fs_* FIFOs. Run it after every test.
+  Done when: all parser tests pass and no FIFO is left behind.
+
+DAY 7 - Integration
+  1. Run the client end to end against the real server and Arjun's file system.
+  2. Run basic_ops.sh and compare with the expected output.
+  3. Log every failure in a shared bug list: command, expected, actual, how to
+     reproduce, owner.
+  Done when: basic_ops.sh passes against the real server.
+
+DAY 8 - Multi-client and demo scripts
+  1. Run multi_client.sh with 4 to 8 clients doing mixed reads and writes on one
+     file.
+  2. deadlock_demo.sh: two clients using lock2 in opposite order. race_demo.sh: two
+     writers on one file. Write both with Aarush.
+  3. Repeat each script 50 times; record any hang, crash or wrong output.
+  4. docs/demo.md: exact commands and expected output for every demo.
+  Done when: scripts are repeatable and every failure is with an owner.
+
+DAY 9 - Polish and report section
+  1. Polish stats and log output so they read well in a live demo.
+  2. Write the CLI, IPC and logging section of the report.
+  3. Draft README.md: build steps, starting the server, using the client, the
+     command reference, how to run each test.
+  4. Collect screenshots: normal session, deadlock demo, stats output.
+  5. Collect the other three report sections by end of day.
+
+DAY 10 - Final report and release
+  1. Assemble the report: merge the four sections, unify formatting, number figures,
+     write the introduction, conclusion and references.
+  2. Finish the README and check every command in it against the real program.
+  3. Clean-clone test: git clone, make, run the demo script, with no manual fixes.
+  4. Tag v1.0 and package the submission.
+  Done when: a fresh clone builds and runs the demo.
+
+
+3. DESIGN DECISIONS AND WHY
+---------------------------------------------------------------------
+
+  One text line per request     Simple to parse, easy to debug with cat and echo, and
+                                lines under PIPE_BUF (4096 bytes) are written
+                                atomically, so concurrent clients cannot interleave.
+  Per-client reply FIFO         The server can answer exactly one client without
+                                parsing replies meant for others.
+  Session id = client pid       Unique per running client without extra bookkeeping.
+  Script mode (-f)              Makes every test automatic and repeatable.
+  Header dependencies in make   Prevents "stale object" bugs after a header change.
+  lock2 test command            Lets the deadlock be triggered on demand, with a
+                                controlled hold time.
+  Logger with one mutex         Simple and enough; keeps every line whole.
+
+
+4. THINGS THAT CAN GO WRONG
+---------------------------------------------------------------------
+
+  1. FIFO open ordering. A blocking open waits for the other end. Open the reply
+     FIFO for reading first, then send, then read the reply. Use O_RDWR on the
+     server side so it does not see EOF when no client is connected.
+  2. Reply FIFO left in /tmp after a crash or Ctrl-C, breaking the next run.
+       Fix: signal handler plus atexit cleanup, and check_fifos.sh.
+  3. Server not running: the client hangs forever on open or read.
+       Fix: a timeout and a clear "server not reachable" message.
+  4. Write data with newlines or very long text breaks the one-line protocol.
+       Fix: reject or escape; state the limit in protocol.md.
+  5. Two clients pick the same session id. Use the pid plus a counter if needed.
+  6. SIGPIPE kills the client if the server dies mid-write. Ignore SIGPIPE and check
+     the write return value.
+  7. Log lines from several threads interleave. Build the whole line first, then
+     write it once under the mutex.
+  8. Scripts that depend on timing (sleep) are flaky. Wait for a reply or a marker
+     line instead, and keep sleeps only where a timing window is intended.
+  9. Merge conflicts on shared files (Makefile, common.h). Only one person edits a
+     shared file at a time; tell the group before you do.
+
+
+5. QUESTIONS TO SETTLE WITH THE TEAM EARLY
+---------------------------------------------------------------------
+
+  With Arjun (Day 1):
+    - fd-based commands or stateless path commands?
+    - Maximum data per write command?
+  With Shwetank (Day 2 to Day 4):
+    - Exact STATS response format, so you can parse it.
+    - Session struct fields the server needs.
+    - How does the server signal "shutting down" to clients?
+  With Aarush (Day 8):
+    - Is lock2 hold time in milliseconds, and what should the demo output show?
+    - Where do detector log lines appear for the demo?
+
+
+6. DEFINITION OF DONE FOR YOUR PART
+---------------------------------------------------------------------
+
+  [ ] make builds everything from a clean clone
+  [ ] protocol.md matches what the client and server actually do
+  [ ] Client supports every command, interactive and script mode
+  [ ] No leftover FIFOs after normal exit, Ctrl-C, or a test run
+  [ ] Logger is thread-safe; no interleaved lines
+  [ ] basic_ops, multi_client, deadlock_demo and race_demo scripts are repeatable
+  [ ] Each script survives 50 runs with every failure handed to an owner
+  [ ] demo.md lists exact commands and expected output
+  [ ] README is accurate; screenshots collected
+  [ ] Final report assembled and v1.0 tag created

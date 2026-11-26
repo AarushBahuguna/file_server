@@ -1,0 +1,28 @@
+# Generated executables
+/bin/
+bench
+client
+server
+test_fs
+test_sched
+test_deadlock
+test_integration
+test_cache
+test_rwlock
+test_protocol
+test_session
+test_stats
+test_log
+
+# Compiled objects and dependencies
+*.o
+*.d
+
+# Generated storage and logs
+disk.img
+logs/
+
+# Editor and temporary files
+.vscode/
+*.tmp
+*.log

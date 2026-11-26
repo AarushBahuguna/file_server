@@ -1,0 +1,42 @@
+SHWETANK TIWARI — SERVER AND SYNCHRONIZATION
+
+Main files:
+- include/server.h
+- include/threadpool.h
+- include/dispatcher.h
+- include/rwlock.h
+- include/cache.h
+- src/server.c
+- src/threadpool.c
+- src/dispatcher.c
+- src/rwlock.c
+- src/cache.c
+- tests/test_rwlock.c
+- tests/test_cache.c
+
+Completed work:
+- Implemented the FIFO server startup and graceful shutdown skeleton.
+- Implemented bounded request queue workers using mutexes and semaphores.
+- Implemented command dispatch behind the integrated protocol.
+- Implemented per-file reader-writer locking.
+- Added reader preference, writer preference, and fair policy constants.
+- Added timed/abortable lock waits.
+- Added reader-session ownership tracking for reader release correctness.
+- Integrated wait-for graph hooks at wait, grant, and release points.
+- Implemented a fixed 64-entry hash-backed LRU cache.
+- Added valid/dirty bits and doubly linked LRU ordering.
+- Added cache miss, eviction, dirty write-back, and flush behavior.
+- Added cache hit/miss/eviction/writeback counters.
+- Ensured disk I/O is not performed while holding the cache mutex.
+- Added server shutdown order: drain workers, flush cache, save disk, destroy state.
+- Added a configurable TCP listener.
+- Added one connection thread per remote client.
+- Sends fixed-size responses over each owning socket.
+- Assigns connection-specific network session IDs.
+- Keeps FIFO mode available for local testing.
+
+Integration role:
+- Dispatches Shubham protocol commands.
+- Calls Arjun filesystem operations.
+- Sends cache misses and dirty writes through Aarush scheduling.
+- Calls Aarush wait-for hooks for lock dependencies and recovery.

@@ -1,0 +1,91 @@
+HOW TO RUN THE INTEGRATED PROJECT
+=================================
+
+1. Open a terminal in:
+   /home/aarushb/Documents/file_server/file_server
+
+2. Create the log directory:
+   mkdir -p logs
+
+3. Build the real server:
+   gcc -std=gnu11 -Wall -Wextra -Iinclude -Isrc \
+     src/disk.c src/alloc.c src/dir.c src/fs.c \
+     src/sched.c src/waitfor.c src/threadpool.c src/dispatcher.c \
+     src/rwlock.c src/cache.c src/server.c src/server_tcp.c \
+     src/common/protocol.c src/common/ipc.c src/common/ipc_tcp.c src/common/log.c \
+     src/common/session.c src/common/stats.c -lpthread -o server
+
+4. Build the client:
+   gcc -std=gnu11 -Wall -Wextra -Iinclude -Isrc \
+     src/common/protocol.c src/common/ipc.c src/common/ipc_tcp.c src/common/log.c \
+     src/common/session.c src/common/stats.c \
+     src/client/parse.c src/client/main.c -lpthread -o client
+
+5. Local FIFO mode:
+   Terminal 1: ./server
+   Terminal 2: ./client alice
+
+6. Multi-laptop TCP mode:
+   On the server laptop:
+     hostname -I
+     export FS_TRANSPORT=tcp
+     export FS_SERVER_PORT=9000
+     ./server
+
+   Open TCP port 9000 in the server firewall.
+
+   On every client laptop:
+     export FS_TRANSPORT=tcp
+     export FS_SERVER_HOST=<server-laptop-IP>
+     export FS_SERVER_PORT=9000
+     ./client alice
+
+   Use a different username on different laptops or client processes.
+
+TCP smoke test:
+  Start the server: FS_TRANSPORT=tcp FS_SERVER_PORT=9000 ./server
+  Run two client sessions:
+    FS_TRANSPORT=tcp FS_SERVER_HOST=<server-IP> FS_SERVER_PORT=9000 ./scripts/test_tcp.sh
+
+  Verified direct protocol operations:
+    login=0, create=0, open=0 fd=3, write=0 length=5, close=0
+
+Available commands:
+  help
+  mkdir <path>
+  cd [path]
+  ls [path]
+  create <path>
+  open <path> [r|w]
+  close <fd>
+  read <fd> <offset> <length>
+  write <fd> <offset> <text>
+  delete <path>
+  stats [table|raw|csv]
+  exit
+
+Script-style client run:
+  printf 'create demo.txt\nopen demo.txt w\nwrite 3 0 hello\nclose 3\nexit\n' | ./client alice
+
+Unit tests:
+  gcc -std=gnu11 -Wall -Wextra -Iinclude -Isrc tests/test_protocol.c src/common/protocol.c -o test_protocol
+  ./test_protocol
+
+  gcc -std=gnu11 -Wall -Wextra -Iinclude -Isrc tests/test_session.c src/common/session.c src/common/protocol.c -lpthread -o test_session
+  ./test_session
+
+  gcc -std=gnu11 -Wall -Wextra -Iinclude -Isrc tests/test_stats.c src/common/stats.c -o test_stats
+  ./test_stats
+
+  gcc -std=gnu11 -Wall -Wextra -Iinclude -Isrc src/disk.c src/alloc.c src/dir.c src/fs.c tests/test_fs.c -lpthread -o test_fs
+  ./test_fs
+
+Shutdown:
+  Press Ctrl-C in the server terminal. The server flushes the cache,
+  saves disk.img, stops workers, destroys synchronization state, and unlinks the FIFO.
+
+Clean FIFOs:
+  ./scripts/cleanup_fifos.sh
+
+Clean generated binaries:
+  rm -f server client test_protocol test_session test_stats test_fs test_sched test_deadlock test_integration test_cache test_rwlock bench disk.img

@@ -1,0 +1,13 @@
+On-request detection
+- Trigger: immediately after wfg_on_wait adds the new waiter -> holder edge
+- Cost: DFS starts from only the newly waiting session
+- Detection delay: effectively the graph-DFS execution time plus cycle recovery scheduling
+- Advantage: fastest catch for the specific cycle that was just formed
+
+Periodic detection
+- Trigger: background full scan at approximately one-second intervals
+- Cost: DFS scans every node in the wait-for graph
+- Detection delay: up to approximately 1 second plus graph-DFS and recovery scheduling
+- Advantage: catches cycles even if only local wait-edge updates are missed
+
+Both modes use the same cycle path and youngest-session victim policy.

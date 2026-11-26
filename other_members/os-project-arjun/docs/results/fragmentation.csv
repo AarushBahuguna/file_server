@@ -1,0 +1,5 @@
+pattern,total_data_blocks,used_blocks,free_blocks,largest_free_run,logical_file_bytes,allocated_file_bytes,internal_fragmentation_bytes
+initial,2030,1,2029,2029,0,0,0
+many_small_files,TO_MEASURE,TO_MEASURE,TO_MEASURE,TO_MEASURE,TO_MEASURE,TO_MEASURE,TO_MEASURE
+few_large_files,TO_MEASURE,TO_MEASURE,TO_MEASURE,TO_MEASURE,TO_MEASURE,TO_MEASURE,TO_MEASURE
+alternating_delete,TO_MEASURE,TO_MEASURE,TO_MEASURE,TO_MEASURE,TO_MEASURE,TO_MEASURE,TO_MEASURE

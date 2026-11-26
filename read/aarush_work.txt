@@ -1,0 +1,36 @@
+AARUSH BAHUGUNA — DISK SCHEDULING AND DEADLOCK DETECTION
+
+Main files:
+- include/sched.h
+- src/sched.c
+- include/waitfor.h
+- src/waitfor.c
+- tests/test_sched.c
+- tests/test_deadlock.c
+- src/bench.c
+
+Completed work:
+- Implemented the disk request queue and scheduler thread.
+- Added FCFS, SCAN, and C-SCAN scheduling.
+- Implemented head-movement, request-count, and wait-time counters.
+- Added the pure next-request selection helper.
+- Added SCAN end-boundary reversal and C-SCAN wrap accounting.
+- Added textbook policy tests for 640, 236, and 382 movement.
+- Added fixed-seed random exactly-once request tests.
+- Implemented a 64x64 wait-for graph with a graph mutex.
+- Added wait, grant, and release edge updates.
+- Added DFS cycle detection for on-request and periodic/full scans.
+- Added cycle-path recording and youngest-session victim selection.
+- Added abort state and -EDEADLK recovery support.
+- Added two-cycle, three-cycle, chain, stale-edge, and repeated-run tests.
+- Implemented the benchmark comparison module and reporting CSV.
+
+Integration role:
+- The cache submits reads/writes through sched_submit.
+- The scheduler is the sole caller of disk_raw_read/disk_raw_write in the full layer.
+- The lock manager calls wait-for hooks at wait, grant, and release points.
+
+TCP network integration:
+- TCP and FIFO requests share the same dispatcher.
+- Remote connection identities map to bounded graph session IDs.
+- Open, read, write, close, and logout lock routing is centralized in the dispatcher.

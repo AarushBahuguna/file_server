@@ -1,0 +1,45 @@
+SHUBHAM GUPTA — CLIENT, IPC, SESSION, AND LOGGING
+
+Main files:
+- include/protocol.h
+- include/ipc.h
+- include/parse.h
+- include/session.h
+- include/log.h
+- include/stats.h
+- src/common/protocol.c
+- src/common/ipc.c
+- src/common/session.c
+- src/common/log.c
+- src/common/stats.c
+- src/client/parse.c
+- src/client/main.c
+- scripts and tests for protocol, sessions, IPC, operations, and logging
+
+Completed work:
+- Defined the frozen fixed-size client/server protocol.
+- Implemented server FIFO and per-PID reply FIFO paths.
+- Added atomic fixed-size request writes and reply request-ID matching.
+- Added client timeout, stale reply, and unreachable-server handling.
+- Implemented interactive and piped/scripted CLI input.
+- Implemented command parsing and argument validation.
+- Added split read and write handling for protocol-sized chunks.
+- Implemented PID-based login/logout sessions.
+- Added per-session cwd and per-session open-FD tables.
+- Added absolute/relative path normalization.
+- Added dead-client session cleanup support.
+- Implemented thread-safe timestamped logging.
+- Implemented key/value statistics with table, raw, and CSV rendering.
+- Added protocol, session, logger, and statistics unit tests.
+- Added operation, FIFO cleanup, logging, fake-server, and multi-client scripts.
+- Added TCP socket transport beside FIFO IPC.
+- Supports FS_TRANSPORT=tcp, FS_SERVER_HOST, and FS_SERVER_PORT.
+- Keeps FIFO mode as the default local transport.
+- Added connection-specific network session identities.
+- Added a multi-laptop TCP smoke script.
+
+Integration role:
+- Sends fixed-size requests to Shwetank's server.
+- Sends sessions to the server dispatcher.
+- Formats Arjun/Shwetank/Aarush statistics from server key/value lines.
+- Provides future demo scripts and release-report tooling.

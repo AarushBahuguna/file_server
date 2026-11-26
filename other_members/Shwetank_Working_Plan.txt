@@ -1,0 +1,259 @@
+SHWETANK TIWARI - WORKING PLAN
+Server & Synchronization Lead
+Project: Multi-User File System with Concurrent Access (10-day plan)
+=====================================================================
+
+
+1. FILE STRUCTURE FOR YOUR PART
+---------------------------------------------------------------------
+
+os-project/
+|-- include/
+|   |-- server.h             server state, request struct, shutdown flag
+|   |-- threadpool.h         bounded queue and worker pool API
+|   |-- dispatcher.h         command table, handler signature
+|   |-- rwlock.h             lock_acquire / lock_release, lock modes, policy flag
+|   `-- cache.h              cache_get / cache_put / cache_flush / cache_stats
+|
+|-- src/
+|   |-- server.c             FIFO listener, session table, startup and shutdown
+|   |-- threadpool.c         bounded request queue (mutex + 2 semaphores), workers
+|   |-- dispatcher.c         command -> handler, lock choice per command, reply writer
+|   |-- rwlock.c             per-file readers-writers locks with starvation control
+|   `-- cache.c              LRU block cache, write-back, flusher thread, stats
+|
+|-- tests/
+|   |-- test_queue.c         bounded queue: no loss, no duplicates, blocks when full
+|   |-- test_rwlock.c        reader concurrency, writer exclusion, starvation
+|   `-- test_cache.c         hits, evictions, write-back (uses a mock disk)
+|
+`-- docs/
+    |-- results/
+    |   |-- cache_hit_ratio.csv      hit ratio vs cache size
+    |   `-- worker_tuning.csv        throughput vs worker count
+    `-- server_sync_cache_section.md your report section
+
+Files you touch but do not own (small, agreed changes only):
+  src/waitfor.c    Aarush. His hooks are called from rwlock.c.
+  src/sched.c      Aarush. cache.c calls sched_submit on a miss or dirty eviction.
+  src/fs.c         Arjun. Your handlers call the fs_* functions.
+  src/fifo_util.c  Shubham. The server uses his FIFO helpers and session.h.
+  src/log.c        Shubham. Call log_event for connections, errors and shutdown.
+
+
+2. HOW I WILL GO ABOUT YOUR WORK
+---------------------------------------------------------------------
+
+2.1 Guiding approach
+
+  - Your modules are where almost every concurrency bug will appear. Test each one
+    with plain threads first, under ThreadSanitizer, before it touches the server.
+  - Build the server skeleton early (Day 2) so Shubham's client has something real
+    to talk to.
+  - Keep locks small and ordered. Follow the shared rule everywhere:
+    file lock -> FS metadata mutex -> cache mutex -> scheduler queue mutex.
+  - Design the lock wait to be abortable from the beginning, since Aarush's
+    deadlock recovery depends on it. Adding it later means rewriting rwlock.c.
+
+2.2 Day by day
+
+DAY 1 - Models and contracts
+  1. Threading model: the main thread reads request lines from the server FIFO and
+     puts them in a bounded queue; N workers (start with 4) take requests, run them
+     and write replies.
+  2. Write rwlock.h and cache.h:
+       int  lock_acquire(int file_id, int mode, int session);   0 or -EDEADLK
+       void lock_release(int file_id, int session);
+       int  cache_get(int block, void *buf);
+       int  cache_put(int block, const void *buf);
+       void cache_flush(void);
+       void cache_stats(struct cache_stats *out);
+  3. With Aarush: agree exactly where in rwlock.c each wfg_* hook is called, and
+     that waiting must be abortable.
+  Output: headers committed.
+
+DAY 2 - Server skeleton
+  1. server.c: create the FIFO, open it O_RDWR (so it never sees EOF when clients
+     disconnect), read one request line at a time.
+  2. threadpool.c: bounded queue using a mutex plus two semaphores (free slots and
+     filled slots), the classic producer-consumer.
+  3. Worker pool: each worker loops on dequeue -> dispatch -> reply.
+  4. Graceful shutdown on SIGINT: set a flag, wake every worker, join them, unlink
+     the FIFO.
+  5. Test with Shubham's echo client at the end of the day.
+  Done when: echo works with 3 clients at once and the server shuts down cleanly.
+
+DAY 3 - Dispatcher and readers-writers lock
+  1. dispatcher.c: a table mapping command names to handler functions, with a clean
+     error reply for unknown commands and malformed requests.
+  2. Reply writer: open the client's reply FIFO, write, close. Ignore SIGPIPE and
+     handle EPIPE when the client has gone.
+  3. rwlock.c using semaphores: a read count guarded by a mutex, and a resource
+     semaphore that writers hold. Locks live in a hash table keyed by file id (inode
+     number), created on demand and freed when no one holds or waits.
+  4. Make waiting abortable: a timed wait or a condition variable with an abort flag
+     instead of a plain blocking wait, so Aarush's detector can wake a victim.
+  Done when: several readers hold one file together and a writer is exclusive.
+
+DAY 4 - Starvation control and LRU cache
+  1. Add a turnstile: a reader arriving after a waiting writer queues behind it, so
+     writers cannot starve. Keep a policy flag (reader-preference, writer-preference,
+     fair) so the demo can show the difference.
+  2. Cache structure: fixed number of entries (start with 64), a hash table from
+     block number to entry, a doubly linked LRU list, valid and dirty bits.
+  3. cache_get: a hit moves the entry to the front; a miss loads through the layer
+     below and may evict the tail entry.
+  4. Counters: hits, misses, evictions.
+  5. Important design point: do not hold the cache mutex while waiting for disk I/O.
+     Mark the entry "loading", release the mutex, perform the I/O, then wake anyone
+     waiting on that entry. If the mutex is held during I/O, only one block request
+     is ever outstanding, the scheduler queue never holds two requests, and
+     Aarush's FCFS, SCAN and C-SCAN comparison shows no difference.
+  Done when: a cache test shows correct hit/miss counts and eviction order.
+
+DAY 5 - Write-back and stats
+  1. cache_put marks the entry dirty; a dirty entry is written down only when it is
+     evicted or flushed.
+  2. cache_flush writes every dirty block; call it on the sync command and at
+     shutdown.
+  3. Optional flusher thread that flushes every few seconds.
+  4. cache_stats: hits, misses, evictions, write-backs, hit ratio.
+  5. The STATS handler: gather numbers from the cache, scheduler and detector into
+     the response format agreed with Shubham.
+  Done when: dirty data survives a shutdown and restart in a test.
+
+DAY 6 - Unit tests (checkpoint)
+  test_queue.c
+    - several producers and consumers: nothing lost or duplicated, producers block
+      when the queue is full
+  test_rwlock.c
+    - 8 readers inside the lock at once (record the maximum concurrent readers)
+    - a writer sees zero readers while it is inside
+    - a stream of readers cannot starve a waiting writer
+  test_cache.c
+    - a known access pattern gives known hits and evictions
+    - a dirty block is written on eviction (mock disk)
+  Run everything under ThreadSanitizer or Helgrind.
+  Done when: all tests pass with no data-race reports.
+
+DAY 7 - Integration (pair with Arjun and Aarush)
+  1. Wire the handlers to Arjun's fs_* calls:
+       shared lock     : read, ls, report, stat
+       exclusive lock  : write on the file; create, delete, mkdir on the parent
+                         directory
+  2. After resolving a path and acquiring the lock, check the file still exists,
+     since it may have been deleted while you waited; return -ENOENT if so.
+  3. Keep one cwd inode per session in the session table.
+  4. Put the cache between fs_* and the disk; on a miss or dirty eviction call
+     Aarush's sched_submit.
+  5. Call Aarush's wfg_* hooks from the lock manager; make lock_acquire return
+     -EDEADLK for a victim and release everything that session holds.
+  6. Check the lock ordering rule across every code path.
+  Done when: a client can create, write and read a file through the real server.
+
+DAY 8 - Stress and tuning
+  1. Fix thread and lock bugs found in full-stack runs.
+  2. Stress test: 8 clients, 4 workers, about 10,000 operations, with a timeout to
+     catch hangs, then run Arjun's fs_check.
+  3. Make sure a client that disappears mid-request does not leave locks held.
+  4. Try worker counts of 1, 2, 4, 8 and cache sizes of 16, 64, 256. Record the
+     results in docs/results and give Aarush the numbers for the comparison module.
+  Done when: the stress test finishes with no hang and a clean fs_check.
+
+DAY 9 - Analysis and report
+  1. Valgrind and Helgrind on the server under load.
+  2. Write docs/server_sync_cache_section.md:
+       - architecture diagram of the whole request path
+       - producer-consumer queue and why semaphores
+       - readers-writers pseudocode and the starvation argument (turnstile)
+       - lock modes per command
+       - cache structure, write-back, and the hit ratio versus cache size table
+  3. Send the diagram and table to Shubham for the final report.
+
+DAY 10 - Demo and Q&A
+  1. Final fixes only.
+  2. Rehearse the concurrency demo: several readers run in parallel, then a writer
+     blocks them, then the cache hit ratio from stats.
+  3. Prepare short answers on: why semaphores, why a turnstile, what write-back
+     risks, what happens when a client crashes while holding a lock.
+  Done when: the demo runs three times in a row without surprises.
+
+
+3. DESIGN DECISIONS AND WHY
+---------------------------------------------------------------------
+
+  Main thread + queue + workers   The listener never blocks on file work, so new
+                                  requests are always accepted.
+  Bounded queue with semaphores   Applies back-pressure when workers are busy; the
+                                  textbook producer-consumer, easy to explain.
+  Lock per file (inode number)    Different files never block each other.
+  Turnstile for starvation        Arrival order is respected, so neither readers nor
+                                  writers wait forever.
+  Abortable wait                  Lets the deadlock detector wake and abort a victim.
+  LRU with doubly linked list     O(1) hit handling and eviction.
+  Write-back                      Fewer disk writes; flushed on evict, sync and
+                                  shutdown.
+  No mutex held during disk I/O   Keeps several requests in the scheduler queue so
+                                  the scheduling comparison is meaningful.
+  cwd per session                 Each user has their own working directory.
+
+
+4. THINGS THAT CAN GO WRONG
+---------------------------------------------------------------------
+
+  1. Server sees EOF on the FIFO when the last client closes it. Open O_RDWR.
+  2. SIGPIPE kills the server when a client vanishes. Ignore SIGPIPE; handle EPIPE.
+  3. Lock table entry freed while another thread still waits on it. Reference-count
+     entries and free only when holders and waiters are both zero.
+  4. Lost wake-up in the readers-writers lock. Test with many threads and repeat
+     runs; use ThreadSanitizer.
+  5. Writer starvation (readers keep arriving) or reader starvation (writer
+     preference). The turnstile test must cover both.
+  6. Lock upgrade (read then write on the same file) deadlocks a session against
+     itself. Decide with Aarush whether to forbid it; the simplest rule is to take
+     the exclusive lock up front when a command might write.
+  7. Path resolved before the lock, file deleted before the lock is granted.
+     Re-check after acquiring.
+  8. Cache mutex held during sched_submit serializes all I/O (see Day 4). Another
+     thread may request the same block while it is loading; make it wait on the
+     entry, not re-load it.
+  9. Dirty block lost at shutdown. Order must be: stop accepting, drain the queue,
+     join workers, cache_flush, then Arjun's disk_save.
+  10. Worker aborted as a deadlock victim returns without releasing everything.
+      Release all locks held by that session before replying with -EDEADLK.
+  11. Lock ordering mistakes causing a real deadlock outside the detector.
+
+
+5. QUESTIONS TO SETTLE WITH THE TEAM EARLY
+---------------------------------------------------------------------
+
+  With Aarush (Day 1 to Day 3):
+    - The exact call point of each wfg_* hook.
+    - What a turnstile-blocked session counts as waiting for (the current holders
+      is the simplest and matches the textbook graph).
+    - How abort wakes a blocked worker.
+  With Arjun (Day 1 and Day 7):
+    - fd-based or stateless path-based read/write commands?
+    - Which fs_* calls need which lock mode?
+    - Shutdown order: cache_flush before disk_save.
+  With Shubham (Day 2 to Day 5):
+    - Session struct fields.
+    - STATS response format.
+    - How the server tells clients it is shutting down.
+
+
+6. DEFINITION OF DONE FOR YOUR PART
+---------------------------------------------------------------------
+
+  [ ] Server accepts several clients at once and shuts down cleanly
+  [ ] Bounded queue loses and duplicates nothing under load
+  [ ] Many readers share a file; a writer is exclusive
+  [ ] No starvation of readers or writers in the test
+  [ ] Lock wait is abortable; victims release all locks
+  [ ] Cache hit/miss/evict counts correct; dirty data survives restart
+  [ ] No mutex held during disk I/O (several requests reach the scheduler)
+  [ ] Stress test (8 clients, ~10,000 ops) finishes with no hang and clean fs_check
+  [ ] ThreadSanitizer/Helgrind clean on the lock and cache tests
+  [ ] Hit-ratio table, worker tuning numbers and report section written
+  [ ] Concurrency demo rehearsed three times in a row
+  [ ] Branch merged to main with tests passing

@@ -1,0 +1,1457 @@
+1. include/server.h
+#ifndef SERVER_H
+#define SERVER_H
+
+#define SERVER_FIFO "/tmp/fs_req"
+#define MAX_REQUEST 1024
+#define MAX_WORKERS 4
+
+typedef struct {
+    char data[MAX_REQUEST];
+} request_t;
+
+int server_start(void);
+void server_stop(void);
+
+#endif
+2. include/threadpool.h
+#ifndef THREADPOOL_H
+#define THREADPOOL_H
+
+#include "server.h"
+
+#define QUEUE_SIZE 64
+
+int threadpool_init(int workers);
+int threadpool_submit(request_t *request);
+void threadpool_shutdown(void);
+
+#endif
+3. include/dispatcher.h
+#ifndef DISPATCHER_H
+#define DISPATCHER_H
+
+#include "server.h"
+
+void dispatch_request(request_t *request);
+
+#endif
+4. include/rwlock.h
+#ifndef RWLOCK_H
+#define RWLOCK_H
+
+#define LOCK_READ  0
+#define LOCK_WRITE 1
+
+int lock_manager_init(void);
+
+int lock_acquire(int file_id, int mode, int session);
+
+void lock_release(int file_id, int session);
+
+void lock_set_policy(int policy);
+
+void lock_manager_destroy(void);
+
+#endif
+5. include/cache.h
+#ifndef CACHE_H
+#define CACHE_H
+
+#define CACHE_SIZE 64
+#define BLOCK_SIZE 512
+#define HASH_SIZE 127
+
+typedef struct {
+    unsigned long hits;
+    unsigned long misses;
+    unsigned long evictions;
+    unsigned long writebacks;
+} cache_stats_t;
+
+int cache_init(void);
+
+int cache_get(int block_no, void *buf);
+
+int cache_put(int block_no, const void *buf);
+
+int cache_flush(void);
+
+void cache_stats(void);
+
+void cache_get_stats(cache_stats_t *stats);
+
+void cache_destroy(void);
+
+#endif
+Source code
+6. src/threadpool.c
+This implements the producer-consumer model using a bounded queue, mutex and semaphores.
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <semaphore.h>
+
+#include "threadpool.h"
+#include "dispatcher.h"
+
+static request_t queue[QUEUE_SIZE];
+
+static int front = 0;
+static int rear = 0;
+static int count = 0;
+
+static pthread_t workers[MAX_WORKERS];
+static int worker_count = 0;
+
+static pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static sem_t empty_slots;
+static sem_t full_slots;
+
+static int shutdown_flag = 0;
+
+/* Worker thread */
+static void *worker_function(void *arg)
+{
+    (void)arg;
+
+    while (1)
+    {
+        sem_wait(&full_slots);
+
+        pthread_mutex_lock(&queue_mutex);
+
+        if (shutdown_flag && count == 0)
+        {
+            pthread_mutex_unlock(&queue_mutex);
+            break;
+        }
+
+        request_t request;
+
+        if (count > 0)
+        {
+            request = queue[front];
+
+            front = (front + 1) % QUEUE_SIZE;
+            count--;
+        }
+        else
+        {
+            pthread_mutex_unlock(&queue_mutex);
+            continue;
+        }
+
+        pthread_mutex_unlock(&queue_mutex);
+
+        sem_post(&empty_slots);
+
+        /* Process request */
+        dispatch_request(&request);
+    }
+
+    return NULL;
+}
+
+/* Initialize thread pool */
+int threadpool_init(int workers_count)
+{
+    if (workers_count <= 0 || workers_count > MAX_WORKERS)
+        return -1;
+
+    worker_count = workers_count;
+
+    shutdown_flag = 0;
+    front = rear = count = 0;
+
+    sem_init(&empty_slots, 0, QUEUE_SIZE);
+    sem_init(&full_slots, 0, 0);
+
+    for (int i = 0; i < worker_count; i++)
+    {
+        if (pthread_create(&workers[i], NULL,
+                           worker_function, NULL) != 0)
+            return -1;
+    }
+
+    return 0;
+}
+
+/* Add request to bounded queue */
+int threadpool_submit(request_t *request)
+{
+    if (!request)
+        return -1;
+
+    sem_wait(&empty_slots);
+
+    pthread_mutex_lock(&queue_mutex);
+
+    if (shutdown_flag)
+    {
+        pthread_mutex_unlock(&queue_mutex);
+        sem_post(&empty_slots);
+        return -1;
+    }
+
+    queue[rear] = *request;
+
+    rear = (rear + 1) % QUEUE_SIZE;
+    count++;
+
+    pthread_mutex_unlock(&queue_mutex);
+
+    sem_post(&full_slots);
+
+    return 0;
+}
+
+/* Graceful shutdown */
+void threadpool_shutdown(void)
+{
+    pthread_mutex_lock(&queue_mutex);
+
+    shutdown_flag = 1;
+
+    pthread_mutex_unlock(&queue_mutex);
+
+    /* Wake all sleeping workers */
+    for (int i = 0; i < worker_count; i++)
+        sem_post(&full_slots);
+
+    for (int i = 0; i < worker_count; i++)
+        pthread_join(workers[i], NULL);
+
+    sem_destroy(&empty_slots);
+    sem_destroy(&full_slots);
+}
+7. src/server.c
+The server receives requests through a named FIFO and distributes them among worker threads.
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <errno.h>
+#include <sys/stat.h>
+
+#include "server.h"
+#include "threadpool.h"
+
+static volatile sig_atomic_t running = 1;
+
+static void handle_signal(int sig)
+{
+    (void)sig;
+    running = 0;
+}
+
+/* Read one complete request line */
+static int read_request(int fd, char *buffer)
+{
+    int i = 0;
+
+    while (i < MAX_REQUEST - 1)
+    {
+        char ch;
+
+        ssize_t n = read(fd, &ch, 1);
+
+        if (n == 0)
+            return i;
+
+        if (n < 0)
+        {
+            if (errno == EINTR)
+                return -1;
+
+            return -1;
+        }
+
+        if (ch == '\n')
+            break;
+
+        buffer[i++] = ch;
+    }
+
+    buffer[i] = '\0';
+
+    return i;
+}
+
+/* Start server */
+int server_start(void)
+{
+    struct sigaction sa;
+
+    memset(&sa, 0, sizeof(sa));
+
+    sa.sa_handler = handle_signal;
+    sigemptyset(&sa.sa_mask);
+
+    sigaction(SIGINT, &sa, NULL);
+    signal(SIGPIPE, SIG_IGN);
+
+    unlink(SERVER_FIFO);
+
+    if (mkfifo(SERVER_FIFO, 0666) < 0)
+    {
+        perror("mkfifo");
+        return -1;
+    }
+
+    /* Initialize worker pool */
+    if (threadpool_init(MAX_WORKERS) < 0)
+    {
+        perror("threadpool_init");
+        unlink(SERVER_FIFO);
+        return -1;
+    }
+
+    /*
+       O_RDWR prevents EOF when clients
+       disconnect from the named FIFO.
+    */
+    int fd = open(SERVER_FIFO, O_RDWR);
+
+    if (fd < 0)
+    {
+        perror("open server FIFO");
+        threadpool_shutdown();
+        unlink(SERVER_FIFO);
+        return -1;
+    }
+
+    printf("File Server Started\n");
+    printf("Listening on %s\n", SERVER_FIFO);
+
+    while (running)
+    {
+        request_t request;
+
+        int result = read_request(fd, request.data);
+
+        if (result < 0)
+        {
+            if (errno == EINTR)
+                continue;
+
+            break;
+        }
+
+        if (result == 0)
+            continue;
+
+        if (threadpool_submit(&request) < 0)
+            break;
+    }
+
+    printf("\nShutting down server...\n");
+
+    close(fd);
+
+    threadpool_shutdown();
+
+    unlink(SERVER_FIFO);
+
+    printf("Server stopped.\n");
+
+    return 0;
+}
+
+void server_stop(void)
+{
+    running = 0;
+}
+
+int main(void)
+{
+    return server_start();
+}
+8. src/dispatcher.c
+This module identifies commands and forwards them to the appropriate filesystem operation.
+The following is the expected filesystem interface. Coordinate these signatures with Arjun.
+include/fs.h
+#ifndef FS_H
+#define FS_H
+
+int fs_create(int cwd, const char *path);
+int fs_delete(int cwd, const char *path);
+int fs_open(int cwd, const char *path, int mode);
+int fs_read(int fd, void *buf, int size);
+int fs_write(int fd, const void *buf, int size);
+int fs_mkdir(int cwd, const char *path);
+int fs_cd(int cwd, const char *path);
+int fs_ls(int cwd, char *output, int size);
+int fs_report(char *output, int size);
+int fs_sync(void);
+
+#endif
+src/dispatcher.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/stat.h>
+
+#include "dispatcher.h"
+#include "rwlock.h"
+#include "cache.h"
+#include "fs.h"
+
+#define MAX_OUTPUT 2048
+#define MAX_SESSIONS 128
+
+typedef struct
+{
+    int session_id;
+    int cwd;
+    char username[64];
+    int active;
+} session_t;
+
+static session_t sessions[MAX_SESSIONS];
+
+/* Find or create session */
+static session_t *get_session(int id, const char *username)
+{
+    for (int i = 0; i < MAX_SESSIONS; i++)
+    {
+        if (sessions[i].active &&
+            sessions[i].session_id == id)
+            return &sessions[i];
+    }
+
+    for (int i = 0; i < MAX_SESSIONS; i++)
+    {
+        if (!sessions[i].active)
+        {
+            sessions[i].active = 1;
+            sessions[i].session_id = id;
+            sessions[i].cwd = 0;
+
+            snprintf(sessions[i].username,
+                     sizeof(sessions[i].username),
+                     "%s", username);
+
+            return &sessions[i];
+        }
+    }
+
+    return NULL;
+}
+
+/* Send response to client FIFO */
+static void send_response(int session, const char *response)
+{
+    char path[128];
+
+    snprintf(path, sizeof(path),
+             "/tmp/fs_resp_%d", session);
+
+    int fd = open(path, O_WRONLY | O_NONBLOCK);
+
+    if (fd < 0)
+        return;
+
+    write(fd, response, strlen(response));
+    write(fd, "\n", 1);
+
+    close(fd);
+}
+
+/* Dispatcher */
+void dispatch_request(request_t *request)
+{
+    int session_id;
+
+    char username[64];
+    char command[64];
+    char args[768] = "";
+
+    char output[MAX_OUTPUT] = "";
+
+    if (sscanf(request->data,
+               "%d %63s %63s %767[^\n]",
+               &session_id,
+               username,
+               command,
+               args) < 3)
+    {
+        return;
+    }
+
+    session_t *session = get_session(session_id, username);
+
+    if (!session)
+    {
+        send_response(session_id, "ERR -ENOMEM Session limit reached");
+        return;
+    }
+
+    int result = -EINVAL;
+
+    int file_id = 0;
+    int mode = LOCK_READ;
+
+    /* CREATE */
+    if (strcmp(command, "create") == 0)
+    {
+        mode = LOCK_WRITE;
+
+        result = fs_create(session->cwd, args);
+    }
+
+    /* DELETE */
+    else if (strcmp(command, "delete") == 0)
+    {
+        mode = LOCK_WRITE;
+
+        result = fs_delete(session->cwd, args);
+    }
+
+    /* OPEN */
+    else if (strcmp(command, "open") == 0)
+    {
+        char path[512];
+        char access[32];
+
+        if (sscanf(args, "%511s %31s", path, access) == 2)
+        {
+            mode = strcmp(access, "w") == 0
+                       ? LOCK_WRITE
+                       : LOCK_READ;
+
+            result = fs_open(session->cwd, path,
+                             mode == LOCK_WRITE);
+        }
+    }
+
+    /* READ */
+    else if (strcmp(command, "read") == 0)
+    {
+        int fd;
+        int size;
+
+        if (sscanf(args, "%d %d", &fd, &size) == 2 &&
+            size > 0 && size < MAX_OUTPUT - 1)
+        {
+            result = fs_read(fd, output, size);
+
+            if (result >= 0)
+            {
+                output[result] = '\0';
+                send_response(session_id, output);
+                return;
+            }
+        }
+    }
+
+    /* WRITE */
+    else if (strcmp(command, "write") == 0)
+    {
+        int fd;
+        char *data = strchr(args, ' ');
+
+        if (data && sscanf(args, "%d", &fd) == 1)
+        {
+            data++;
+
+            result = fs_write(fd, data, strlen(data));
+        }
+    }
+
+    /* MKDIR */
+    else if (strcmp(command, "mkdir") == 0)
+    {
+        mode = LOCK_WRITE;
+
+        result = fs_mkdir(session->cwd, args);
+    }
+
+    /* CD */
+    else if (strcmp(command, "cd") == 0)
+    {
+        result = fs_cd(session->cwd, args);
+
+        if (result >= 0)
+        {
+            session->cwd = result;
+            result = 0;
+        }
+    }
+
+    /* LS */
+    else if (strcmp(command, "ls") == 0)
+    {
+        result = fs_ls(session->cwd, output, sizeof(output));
+
+        if (result >= 0)
+        {
+            send_response(session_id, output);
+            return;
+        }
+    }
+
+    /* REPORT */
+    else if (strcmp(command, "report") == 0)
+    {
+        result = fs_report(output, sizeof(output));
+
+        if (result >= 0)
+        {
+            send_response(session_id, output);
+            return;
+        }
+    }
+
+    /* SYNC */
+    else if (strcmp(command, "sync") == 0)
+    {
+        result = cache_flush();
+
+        if (result == 0)
+            result = fs_sync();
+    }
+
+    /* EXIT */
+    else if (strcmp(command, "exit") == 0)
+    {
+        session->active = 0;
+        send_response(session_id, "OK BYE");
+        return;
+    }
+
+    /* PWD */
+    else if (strcmp(command, "pwd") == 0)
+    {
+        snprintf(output, sizeof(output),
+                 "Current directory inode: %d",
+                 session->cwd);
+
+        send_response(session_id, output);
+        return;
+    }
+
+    /* STATS */
+    else if (strcmp(command, "stats") == 0)
+    {
+        cache_stats();
+
+        send_response(session_id, "OK Statistics printed on server");
+        return;
+    }
+
+    else
+    {
+        result = -EINVAL;
+    }
+
+    if (result < 0)
+    {
+        snprintf(output, sizeof(output),
+                 "ERR %d Operation failed", result);
+    }
+    else
+    {
+        snprintf(output, sizeof(output),
+                 "OK %d", result);
+    }
+
+    send_response(session_id, output);
+}
+9. src/rwlock.c
+This is one of your most important modules. It implements per-file readers-writers locks.
+It supports three policies:
+    • Reader preference
+    • Writer preference
+    • Fair access
+It also uses timed condition-variable waits so the deadlock detector can periodically check whether a waiting session has been selected as a victim.
+include/waitfor.h
+Coordinate these hook signatures with Aarush.
+#ifndef WAITFOR_H
+#define WAITFOR_H
+
+void wfg_on_wait(int session, int file_id);
+void wfg_on_grant(int session, int file_id);
+void wfg_on_release(int session, int file_id);
+
+int wfg_is_aborted(int session);
+
+#endif
+src/rwlock.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <errno.h>
+#include <time.h>
+
+#include "rwlock.h"
+#include "waitfor.h"
+
+#define LOCK_TABLE_SIZE 257
+
+#define READER_PREFERENCE 0
+#define WRITER_PREFERENCE 1
+#define FAIR_POLICY       2
+
+typedef struct FileLock
+{
+    int file_id;
+
+    int readers;
+    int writer;
+
+    int waiting_readers;
+    int waiting_writers;
+
+    pthread_mutex_t mutex;
+    pthread_cond_t condition;
+
+    struct FileLock *next;
+
+} FileLock;
+
+static FileLock *lock_table[LOCK_TABLE_SIZE];
+
+static pthread_mutex_t table_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static int current_policy = FAIR_POLICY;
+
+/* Hash function */
+static unsigned int hash_file(int file_id)
+{
+    return (unsigned int)file_id % LOCK_TABLE_SIZE;
+}
+
+/* Find or create file lock */
+static FileLock *get_file_lock(int file_id)
+{
+    unsigned int index = hash_file(file_id);
+
+    pthread_mutex_lock(&table_mutex);
+
+    FileLock *lock = lock_table[index];
+
+    while (lock)
+    {
+        if (lock->file_id == file_id)
+        {
+            pthread_mutex_unlock(&table_mutex);
+            return lock;
+        }
+
+        lock = lock->next;
+    }
+
+    FileLock *new_lock = calloc(1, sizeof(FileLock));
+
+    if (!new_lock)
+    {
+        pthread_mutex_unlock(&table_mutex);
+        return NULL;
+    }
+
+    new_lock->file_id = file_id;
+
+    pthread_mutex_init(&new_lock->mutex, NULL);
+    pthread_cond_init(&new_lock->condition, NULL);
+
+    new_lock->next = lock_table[index];
+
+    lock_table[index] = new_lock;
+
+    pthread_mutex_unlock(&table_mutex);
+
+    return new_lock;
+}
+
+/* Initialize lock manager */
+int lock_manager_init(void)
+{
+    for (int i = 0; i < LOCK_TABLE_SIZE; i++)
+        lock_table[i] = NULL;
+
+    current_policy = FAIR_POLICY;
+
+    return 0;
+}
+
+/* Select locking policy */
+void lock_set_policy(int policy)
+{
+    if (policy < READER_PREFERENCE || policy > FAIR_POLICY)
+        return;
+
+    pthread_mutex_lock(&table_mutex);
+
+    current_policy = policy;
+
+    pthread_mutex_unlock(&table_mutex);
+}
+
+/* Abortable timed wait */
+static int wait_for_change(FileLock *lock, int session)
+{
+    struct timespec timeout;
+
+    clock_gettime(CLOCK_REALTIME, &timeout);
+
+    timeout.tv_nsec += 100000000L; /* 100 ms */
+
+    if (timeout.tv_nsec >= 1000000000L)
+    {
+        timeout.tv_sec++;
+        timeout.tv_nsec -= 1000000000L;
+    }
+
+    pthread_cond_timedwait(
+        &lock->condition,
+        &lock->mutex,
+        &timeout
+    );
+
+    /*
+       Aarush's detector marks an aborted
+       session and wakes it through this
+       periodic check.
+    */
+
+    if (wfg_is_aborted(session))
+        return -EDEADLK;
+
+    return 0;
+}
+
+/* Acquire lock */
+int lock_acquire(int file_id, int mode, int session)
+{
+    if (mode != LOCK_READ && mode != LOCK_WRITE)
+        return -EINVAL;
+
+    FileLock *lock = get_file_lock(file_id);
+
+    if (!lock)
+        return -ENOMEM;
+
+    pthread_mutex_lock(&lock->mutex);
+
+    if (mode == LOCK_READ)
+        lock->waiting_readers++;
+    else
+        lock->waiting_writers++;
+
+    /* Register waiting request */
+    wfg_on_wait(session, file_id);
+
+    while (1)
+    {
+        int can_acquire = 0;
+
+        int policy = current_policy;
+
+        if (mode == LOCK_READ)
+        {
+            if (policy == READER_PREFERENCE)
+            {
+                can_acquire = (lock->writer == 0);
+            }
+            else
+            {
+                can_acquire =
+                    (lock->writer == 0 &&
+                     lock->waiting_writers == 0);
+            }
+        }
+        else
+        {
+            can_acquire =
+                (lock->writer == 0 &&
+                 lock->readers == 0);
+        }
+
+        if (wfg_is_aborted(session))
+        {
+            if (mode == LOCK_READ)
+                lock->waiting_readers--;
+            else
+                lock->waiting_writers--;
+
+            wfg_on_release(session, file_id);
+
+            pthread_cond_broadcast(&lock->condition);
+
+            pthread_mutex_unlock(&lock->mutex);
+
+            return -EDEADLK;
+        }
+
+        if (can_acquire)
+            break;
+
+        if (wait_for_change(lock, session) == -EDEADLK)
+        {
+            if (mode == LOCK_READ)
+                lock->waiting_readers--;
+            else
+                lock->waiting_writers--;
+
+            wfg_on_release(session, file_id);
+
+            pthread_cond_broadcast(&lock->condition);
+
+            pthread_mutex_unlock(&lock->mutex);
+
+            return -EDEADLK;
+        }
+    }
+
+    /* Grant lock */
+    if (mode == LOCK_READ)
+    {
+        lock->waiting_readers--;
+        lock->readers++;
+    }
+    else
+    {
+        lock->waiting_writers--;
+        lock->writer = session;
+    }
+
+    wfg_on_grant(session, file_id);
+
+    pthread_mutex_unlock(&lock->mutex);
+
+    return 0;
+}
+
+/* Release lock */
+void lock_release(int file_id, int session)
+{
+    FileLock *lock = get_file_lock(file_id);
+
+    if (!lock)
+        return;
+
+    pthread_mutex_lock(&lock->mutex);
+
+    if (lock->writer == session)
+    {
+        lock->writer = 0;
+    }
+    else if (lock->readers > 0)
+    {
+        lock->readers--;
+    }
+
+    wfg_on_release(session, file_id);
+
+    pthread_cond_broadcast(&lock->condition);
+
+    pthread_mutex_unlock(&lock->mutex);
+}
+
+/* Destroy lock manager */
+void lock_manager_destroy(void)
+{
+    pthread_mutex_lock(&table_mutex);
+
+    for (int i = 0; i < LOCK_TABLE_SIZE; i++)
+    {
+        FileLock *current = lock_table[i];
+
+        while (current)
+        {
+            FileLock *next = current->next;
+
+            pthread_mutex_destroy(&current->mutex);
+            pthread_cond_destroy(&current->condition);
+
+            free(current);
+
+            current = next;
+        }
+
+        lock_table[i] = NULL;
+    }
+
+    pthread_mutex_unlock(&table_mutex);
+}
+Important integration note: This is a starter lock-table implementation. For production correctness, track each reader's session ID rather than only a reader count. Otherwise, lock_release() cannot verify which reader owns a lock. Also, the wait-for graph must distinguish waiting edges from granted ownership. Aarush's hook implementation must follow that distinction.
+10. src/cache.c
+This implements your LRU buffer cache with write-back.
+PART-2: CODING PATTERN & TEMPLATE for LINEAR DS ( Personal Notes) - Discuss - LeetCode
+leetcode.com
+include/sched.h
+The scheduler interface follows the workflow's sched_submit() design.
+#ifndef SCHED_H
+#define SCHED_H
+
+#include <semaphore.h>
+
+#include "cache.h"
+
+typedef struct disk_req
+{
+    int block;
+    int is_write;
+
+    void *buf;
+
+    sem_t done;
+
+    int status;
+
+} disk_req_t;
+
+/* Submit request and wait until completed */
+int sched_submit(disk_req_t *req);
+
+#endif
+src/cache.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <semaphore.h>
+
+#include "cache.h"
+#include "sched.h"
+
+typedef struct CacheEntry
+{
+    int block_no;
+
+    int valid;
+    int dirty;
+
+    char data[BLOCK_SIZE];
+
+    struct CacheEntry *prev;
+    struct CacheEntry *next;
+
+    struct CacheEntry *hash_next;
+
+} CacheEntry;
+
+static CacheEntry entries[CACHE_SIZE];
+
+static CacheEntry *hash_table[HASH_SIZE];
+
+static CacheEntry *lru_head = NULL;
+static CacheEntry *lru_tail = NULL;
+
+static pthread_mutex_t cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static cache_stats_t stats;
+
+/* Hash function */
+static unsigned int hash_block(int block)
+{
+    return (unsigned int)block % HASH_SIZE;
+}
+
+/* Find block in hash table */
+static CacheEntry *find_entry(int block)
+{
+    unsigned int index = hash_block(block);
+
+    CacheEntry *current = hash_table[index];
+
+    while (current)
+    {
+        if (current->valid && current->block_no == block)
+            return current;
+
+        current = current->hash_next;
+    }
+
+    return NULL;
+}
+
+/* Remove from LRU list */
+static void remove_lru(CacheEntry *entry)
+{
+    if (entry->prev)
+        entry->prev->next = entry->next;
+    else
+        lru_head = entry->next;
+
+    if (entry->next)
+        entry->next->prev = entry->prev;
+    else
+        lru_tail = entry->prev;
+
+    entry->prev = NULL;
+    entry->next = NULL;
+}
+
+/* Insert at front */
+static void insert_front(CacheEntry *entry)
+{
+    entry->prev = NULL;
+    entry->next = lru_head;
+
+    if (lru_head)
+        lru_head->prev = entry;
+
+    lru_head = entry;
+
+    if (!lru_tail)
+        lru_tail = entry;
+}
+
+/* Move recently used entry to front */
+static void move_to_front(CacheEntry *entry)
+{
+    if (entry == lru_head)
+        return;
+
+    remove_lru(entry);
+
+    insert_front(entry);
+}
+
+/* Add entry to hash table */
+static void hash_insert(CacheEntry *entry)
+{
+    unsigned int index = hash_block(entry->block_no);
+
+    entry->hash_next = hash_table[index];
+
+    hash_table[index] = entry;
+}
+
+/* Remove entry from hash table */
+static void hash_remove(CacheEntry *entry)
+{
+    unsigned int index = hash_block(entry->block_no);
+
+    CacheEntry **current = &hash_table[index];
+
+    while (*current)
+    {
+        if (*current == entry)
+        {
+            *current = entry->hash_next;
+            entry->hash_next = NULL;
+            return;
+        }
+
+        current = &(*current)->hash_next;
+    }
+}
+
+/* Read block through scheduler */
+static int disk_read_block(int block, void *buffer)
+{
+    disk_req_t request;
+
+    request.block = block;
+    request.is_write = 0;
+    request.buf = buffer;
+    request.status = -1;
+
+    if (sem_init(&request.done, 0, 0) != 0)
+        return -1;
+
+    int result = sched_submit(&request);
+
+    sem_destroy(&request.done);
+
+    return result;
+}
+
+/* Write block through scheduler */
+static int disk_write_block(int block, void *buffer)
+{
+    disk_req_t request;
+
+    request.block = block;
+    request.is_write = 1;
+    request.buf = buffer;
+    request.status = -1;
+
+    if (sem_init(&request.done, 0, 0) != 0)
+        return -1;
+
+    int result = sched_submit(&request);
+
+    sem_destroy(&request.done);
+
+    return result;
+}
+
+/* Initialize cache */
+int cache_init(void)
+{
+    pthread_mutex_lock(&cache_mutex);
+
+    memset(entries, 0, sizeof(entries));
+    memset(hash_table, 0, sizeof(hash_table));
+    memset(&stats, 0, sizeof(stats));
+
+    lru_head = NULL;
+    lru_tail = NULL;
+
+    for (int i = 0; i < CACHE_SIZE; i++)
+    {
+        entries[i].valid = 0;
+        entries[i].dirty = 0;
+
+        insert_front(&entries[i]);
+    }
+
+    pthread_mutex_unlock(&cache_mutex);
+
+    return 0;
+}
+
+/* Get block */
+int cache_get(int block_no, void *buffer)
+{
+    if (block_no < 0 || !buffer)
+        return -1;
+
+    pthread_mutex_lock(&cache_mutex);
+
+    CacheEntry *entry = find_entry(block_no);
+
+    /* Cache hit */
+    if (entry)
+    {
+        stats.hits++;
+
+        move_to_front(entry);
+
+        memcpy(buffer, entry->data, BLOCK_SIZE);
+
+        pthread_mutex_unlock(&cache_mutex);
+
+        return 0;
+    }
+
+    /* Cache miss */
+    stats.misses++;
+
+    /* Select least recently used entry */
+    entry = lru_tail;
+
+    if (!entry)
+    {
+        pthread_mutex_unlock(&cache_mutex);
+        return -1;
+    }
+
+    /* Write dirty data before eviction */
+    if (entry->valid)
+    {
+        if (entry->dirty)
+        {
+            if (disk_write_block(entry->block_no, entry->data) < 0)
+            {
+                pthread_mutex_unlock(&cache_mutex);
+                return -1;
+            }
+
+            stats.writebacks++;
+        }
+
+        hash_remove(entry);
+
+        stats.evictions++;
+    }
+
+    /* Load requested block */
+    if (disk_read_block(block_no, entry->data) < 0)
+    {
+        pthread_mutex_unlock(&cache_mutex);
+        return -1;
+    }
+
+    entry->block_no = block_no;
+
+    entry->valid = 1;
+    entry->dirty = 0;
+
+    hash_insert(entry);
+
+    move_to_front(entry);
+
+    memcpy(buffer, entry->data, BLOCK_SIZE);
+
+    pthread_mutex_unlock(&cache_mutex);
+
+    return 0;
+}
+
+/* Put block */
+int cache_put(int block_no, const void *buffer)
+{
+    if (block_no < 0 || !buffer)
+        return -1;
+
+    pthread_mutex_lock(&cache_mutex);
+
+    CacheEntry *entry = find_entry(block_no);
+
+    if (entry)
+    {
+        memcpy(entry->data, buffer, BLOCK_SIZE);
+
+        entry->dirty = 1;
+
+        move_to_front(entry);
+
+        pthread_mutex_unlock(&cache_mutex);
+
+        return 0;
+    }
+
+    /* Allocate an LRU entry */
+    entry = lru_tail;
+
+    if (!entry)
+    {
+        pthread_mutex_unlock(&cache_mutex);
+        return -1;
+    }
+
+    if (entry->valid)
+    {
+        if (entry->dirty)
+        {
+            if (disk_write_block(entry->block_no, entry->data) < 0)
+            {
+                pthread_mutex_unlock(&cache_mutex);
+                return -1;
+            }
+
+            stats.writebacks++;
+        }
+
+        hash_remove(entry);
+
+        stats.evictions++;
+    }
+
+    entry->block_no = block_no;
+
+    entry->valid = 1;
+    entry->dirty = 1;
+
+    memcpy(entry->data, buffer, BLOCK_SIZE);
+
+    hash_insert(entry);
+
+    move_to_front(entry);
+
+    pthread_mutex_unlock(&cache_mutex);
+
+    return 0;
+}
+
+/* Flush dirty blocks */
+int cache_flush(void)
+{
+    pthread_mutex_lock(&cache_mutex);
+
+    for (int i = 0; i < CACHE_SIZE; i++)
+    {
+        CacheEntry *entry = &entries[i];
+
+        if (entry->valid && entry->dirty)
+        {
+            if (disk_write_block(entry->block_no, entry->data) < 0)
+            {
+                pthread_mutex_unlock(&cache_mutex);
+                return -1;
+            }
+
+            entry->dirty = 0;
+
+            stats.writebacks++;
+        }
+    }
+
+    pthread_mutex_unlock(&cache_mutex);
+
+    return 0;
+}
+
+/* Return cache statistics */
+void cache_get_stats(cache_stats_t *result)
+{
+    if (!result)
+        return;
+
+    pthread_mutex_lock(&cache_mutex);
+
+    *result = stats;
+
+    pthread_mutex_unlock(&cache_mutex);
+}
+
+/* Print cache statistics */
+void cache_stats(void)
+{
+    pthread_mutex_lock(&cache_mutex);
+
+    unsigned long total = stats.hits + stats.misses;
+
+    double hit_ratio = total
+        ? (double)stats.hits / total
+        : 0.0;
+
+    printf("\n-------- CACHE STATISTICS --------\n");
+
+    printf("Hits       : %lu\n", stats.hits);
+    printf("Misses     : %lu\n", stats.misses);
+    printf("Evictions  : %lu\n", stats.evictions);
+    printf("Writebacks : %lu\n", stats.writebacks);
+
+    printf("Hit Ratio  : %.2f%%\n", hit_ratio * 100);
+
+    printf("----------------------------------\n");
+
+    pthread_mutex_unlock(&cache_mutex);
+}
+
+/* Destroy cache */
+void cache_destroy(void)
+{
+    cache_flush();
+
+    pthread_mutex_destroy(&cache_mutex);
+}
+11. Compilation and testing
+Once the other team members provide their interfaces, compile using:
+gcc -Wall -Wextra -g -pthread \
+    -Iinclude \
+    src/server.c \
+    src/threadpool.c \
+    src/dispatcher.c \
+    src/rwlock.c \
+    src/cache.c \
+    src/fs.c \
+    src/disk.c \
+    src/sched.c \
+    src/waitfor.c \
+    -o server
+Run:
+./server
+12. Important things to fix during integration
+These implementations are starting versions, not yet a fully integrated submission. In particular:
+    1. Dispatcher: Connect lock_acquire() and lock_release() to actual file operations. You'll need Arjun's inode/file-descriptor lookup API to identify the correct file lock. The current dispatcher does not yet acquire those locks.
+    2. Readers-writers: Track reader session ownership so one session cannot release another session's lock.
+    3. Deadlock detector: Match the waitfor.h function signatures with Aarush's implementation.
+    4. Cache: Match sched_submit()'s completion and error-handling contract with Aarush's scheduler.
+    5. Sessions: Protect the session table with a mutex because multiple workers can access it concurrently.
+My recommendation: Implement and test these five modules separately first, then integrate them on Day 7. Don't merge them into main until the unit tests pass.
+Is this conversation helpful so far?
+

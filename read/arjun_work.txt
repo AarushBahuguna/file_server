@@ -1,0 +1,37 @@
+ARJUN BANSAL — STORAGE AND FILE SYSTEM
+
+Main files:
+- include/common.h
+- include/disk.h
+- include/fs.h
+- src/disk.c
+- src/alloc.c
+- src/dir.c
+- src/fs.c
+- src/fs_internal.h
+- tests/test_fs.c
+
+Completed work:
+- Implemented a 2048-block, 512-byte simulated disk.
+- Added disk initialization, load/save, bounds checks, and disk counters.
+- Implemented free-block bitmap and inode allocation.
+- Implemented 10 direct pointers and one indirect pointer per inode.
+- Implemented the 70,656-byte maximum file size and indexed allocation.
+- Implemented directory entries and nested path resolution.
+- Added absolute/relative paths, ., .., and root behavior.
+- Implemented create, delete, mkdir, cd, ls, open, close, read, and write.
+- Added open-file descriptors and offset-based file I/O.
+- Added partial-block read-modify-write behavior.
+- Added fs_report and fs_check consistency validation.
+- Implemented disk-full, bad-path, delete-directory, and persistence behavior.
+
+Integration role:
+- Shwetank's cache and dispatcher call the storage APIs.
+- Metadata operations use Arjun's metadata mutex.
+- Disk raw operations are used by the scheduler/cache integration path.
+- The storage test is independently reproducible without the server.
+
+TCP network integration:
+- All laptops share the server laptop's disk state.
+- Cache flush is completed before disk_save at shutdown.
+- Run fs_check after multi-laptop stress tests and clean shutdown/restart.

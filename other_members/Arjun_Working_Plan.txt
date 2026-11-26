@@ -1,0 +1,233 @@
+ARJUN BANSAL - WORKING PLAN
+Storage Lead
+Project: Multi-User File System with Concurrent Access (10-day plan)
+=====================================================================
+
+
+1. FILE STRUCTURE FOR YOUR PART
+---------------------------------------------------------------------
+
+os-project/
+|-- include/
+|   |-- common.h             shared constants and error codes (written with the whole team on Day 1)
+|   |-- disk.h               disk_raw_read/write, disk_save/load, disk counters
+|   `-- fs.h                 public fs_* API, struct definitions (superblock, inode, dir entry)
+|
+|-- src/
+|   |-- disk.c               simulated disk array, load/save of disk.img, bounds checks, counters
+|   |-- alloc.c              free-block bitmap, inode allocation, indexed allocation
+|   |-- dir.c                directory entries, lookup, path resolution
+|   `-- fs.c                 fs_create/delete/open/read/write/mkdir/cd/ls, open-file table,
+|                            fs_report, fs_check
+|
+|-- tests/
+|   `-- test_fs.c            file system unit tests (no server needed)
+|
+`-- docs/
+    |-- results/
+    |   `-- fragmentation.csv    numbers for the report
+    `-- storage_section.md       your report section
+
+Generated, not committed (add to .gitignore): disk.img
+
+Files you touch but do not own (small, agreed changes only):
+  src/cache.c       Shwetank. Sits between fs_* and the scheduler on Day 7.
+  src/sched.c       Aarush. His scheduler thread is the only caller of your disk_raw_*.
+  src/dispatcher.c  Shwetank. His handlers call your fs_* functions.
+
+
+2. HOW I WILL GO ABOUT YOUR WORK
+---------------------------------------------------------------------
+
+2.1 Guiding approach
+
+  - Get a complete, working file system with no server and no cache first.
+    Everything else (threads, locks, caching, scheduling) is layered on top later.
+  - Keep the on-disk format fixed on Day 1. Changing the layout late breaks every
+    function that touches it.
+  - Build in strict layers: disk -> bitmap -> inodes -> directories -> fs_* API.
+    Each layer gets a small test before the next one starts.
+  - Write fs_check early. It turns "something seems wrong" into a yes/no answer for
+    the whole team during integration.
+
+2.2 Day by day
+
+DAY 1 - Layout and headers
+  1. Finalize common.h with the team:
+       BLOCK_SIZE 512, NUM_BLOCKS 2048 (1 MB), error codes, MAX_NAME 28.
+  2. Fix the on-disk layout and write it as a comment block at the top of fs.h:
+       block 0          superblock (magic, block count, inode count, free counts)
+       block 1          free-block bitmap (2048 bits = 256 bytes)
+       blocks 2-17      inode table (128 inodes x 64 bytes, 8 per block)
+       blocks 18-2047   data blocks
+  3. Inode, 64 bytes: type, size, owner, permissions, block count,
+     10 direct pointers, 1 single-indirect pointer.
+     Maximum file size = (10 + 128) x 512 = 70,656 bytes. Note this in the report.
+  4. Directory entry, 32 bytes: 28-byte name + 4-byte inode number (16 per block).
+  5. Write disk.h and fs.h with every function signature and a one-line comment.
+       fs_create(path, user, cwd), fs_delete(path, cwd), fs_open(path, mode, cwd),
+       fs_read(fd, buf, n, off), fs_write(fd, buf, n, off), fs_mkdir(path, cwd),
+       fs_cd(path, cwd), fs_ls(path, cwd, out), fs_report(out), fs_check()
+     Every path call takes the cwd inode so the server can keep one per session.
+  Output: headers committed. Nobody waits on a signature after this.
+
+DAY 2 - Disk and bitmap
+  1. disk.c: an in-memory array of NUM_BLOCKS x BLOCK_SIZE bytes.
+       disk_load() reads disk.img at startup; disk_save() writes it at shutdown.
+  2. disk_raw_read/write with bounds checks (return -EINVAL) and read/write counters.
+  3. mkfs: zero the disk, write the superblock, mark metadata blocks used in the
+     bitmap, create the root directory inode (inode 0).
+  4. alloc_block / free_block using the bitmap, guarded by a metadata mutex.
+  Done when: a test formats a disk, allocates 10 blocks, frees 5, allocates again,
+  and gets the expected block numbers.
+
+DAY 3 - Inodes and indexed allocation
+  1. Inode alloc/free with a bitmap or a free flag in the inode.
+  2. Indexed allocation: a function that maps (inode, logical block index) to a
+     physical block via the direct or indirect pointers, allocating on demand.
+  3. fs_create: allocate an inode, add a directory entry in the root for now.
+     fs_delete: free every data block, the indirect block, the inode, and the entry.
+  4. Add a compile-time switch for contiguous allocation as the fallback if indexed
+     runs late.
+  5. Roll back on failure: if create fails halfway (no space for the entry), free
+     what was already allocated.
+  Done when: creating and deleting 20 files returns the bitmap and inode table to
+  exactly the starting state.
+
+DAY 4 - Directories and paths
+  1. dir.c: add_entry, remove_entry, lookup over a directory's data blocks.
+  2. Path resolution: absolute and relative, with . and .. (root's .. is root).
+     Split on '/', walk one component at a time, return -ENOENT if a component is
+     missing and -ENOTDIR if a component is a file.
+  3. fs_mkdir, fs_cd (returns the new cwd inode), fs_ls (one line each: name, type,
+     size).
+  4. Make fs_create and fs_delete work in any directory. Reject duplicates
+     (-EEXIST), missing parents (-ENOENT), and deleting a non-empty directory.
+  Done when: mkdir a/b/c, create a file in it, cd .., and ls all behave correctly.
+
+DAY 5 - File I/O and reporting
+  1. Open-file table: fd -> inode, offset, mode.
+  2. fs_read / fs_write with offsets. Writes extend the file, cross from direct to
+     indirect blocks, and handle partial blocks with read-modify-write.
+  3. fs_report: total, used, free blocks; internal fragmentation (allocated bytes
+     minus file bytes); external fragmentation (largest free run versus total free
+     blocks); blocks per file.
+  4. fs_check: walk every inode, collect the blocks in use, and confirm the bitmap
+     matches exactly (no leaked blocks, no block used twice).
+  Done when: a file larger than 10 blocks round-trips correctly and fs_report
+  prints sensible numbers.
+
+DAY 6 - Unit tests (checkpoint)
+  test_fs.c
+    - write then read back across the direct/indirect boundary
+    - delete returns the blocks (fs_check passes)
+    - nested directories, cd and relative paths
+    - disk full returns -ENOSPC and leaves the file system consistent
+    - bad paths return the right error
+  Run under Valgrind and AddressSanitizer; fix everything they report.
+  Done when: all tests pass with zero Valgrind errors.
+
+DAY 7 - Integration (pair with Shwetank and Aarush)
+  1. Rename the current disk_read/write to disk_raw_read/write.
+  2. Add disk_read/write wrappers that call Shwetank's cache API. The chain becomes
+     fs_* -> cache -> scheduler -> disk_raw_*.
+  3. Confirm every metadata update (bitmap, inode table, directory blocks) holds the
+     metadata mutex. File locks do not protect these structures.
+  4. Fix shutdown order: stop workers, cache_flush, then disk_save. Flushing after
+     saving loses data.
+  5. Re-run test_fs.c through the full stack.
+  Done when: test_fs.c passes with cache and scheduler enabled.
+
+DAY 8 - Bug fixing under load
+  1. Fix FS bugs found in full-stack runs.
+  2. Run fs_check after every multi-client test script and after a clean shutdown
+     and restart.
+  3. Test 4 clients creating and deleting files in the same directory at once.
+  4. Test persistence: write data, shut down, restart, read it back.
+  Done when: no fs_check failures across 20 consecutive multi-client runs.
+
+DAY 9 - Numbers and report
+  1. Valgrind and GDB over the storage layer under load.
+  2. Fragmentation numbers: create and delete files in several patterns (many small
+     files, a few large ones, alternating delete) and record internal and external
+     fragmentation in docs/results/fragmentation.csv.
+  3. Write docs/storage_section.md: layout diagram, indexed allocation and its size
+     limit, directory structure, fragmentation results. Mention linked and
+     contiguous allocation as alternatives and why indexed was chosen.
+
+DAY 10 - Cleanup and demo
+  1. Comment every public function; remove debug prints.
+  2. Final bug-fix window, then freeze your branch.
+  3. Prepare a 2-minute demo: fs_report before and after heavy create/delete.
+  Done when: branch merged and tagged, demo rehearsed.
+
+
+3. DESIGN DECISIONS AND WHY
+---------------------------------------------------------------------
+
+  Indexed allocation          No external fragmentation, fast random access, easy to
+                              explain. Linked is slow for random access; contiguous
+                              fragments the free space.
+  10 direct + 1 indirect      Small inode, covers small files with one lookup, and the
+                              size limit is easy to state (70,656 bytes).
+  Fixed on-disk layout        Frozen on Day 1 so no later change breaks other code.
+  cwd passed as a parameter   Keeps the FS stateless about sessions; the server owns
+                              one cwd per session.
+  Metadata mutex              Short critical sections protect the bitmap, inode table
+                              and directories. File locks protect file contents only.
+  fs_check                    One yes/no consistency test the whole team can run.
+  disk.img persistence        Lets you demonstrate data surviving a restart.
+
+
+4. THINGS THAT CAN GO WRONG
+---------------------------------------------------------------------
+
+  1. Two clients create the same name at once and both succeed.
+       Fix: the lookup and the add_entry happen inside one metadata-mutex critical
+       section, not two.
+  2. Leaked blocks after a failed operation (disk full midway through a write).
+       Fix: free what you allocated on every error path; fs_check catches leaks.
+  3. Extending a file across the direct/indirect boundary allocates the indirect
+     block but loses it on error. Test this boundary explicitly.
+  4. Partial-block writes overwrite neighbouring bytes. Always read the old block,
+     patch the range, then write it back.
+  5. Deleting a directory that still has entries, or deleting the cwd of a session.
+       Fix: refuse non-empty directories; decide what happens to a session whose cwd
+       was removed (return -ENOENT on the next command).
+  6. Path edge cases: trailing slash, double slash, "..", names longer than 28 chars.
+  7. Shutdown order wrong (disk_save before cache_flush) so recent writes vanish.
+  8. Bitmap or inode access without the metadata mutex when called from several
+     worker threads.
+  9. Lock ordering mistake. Follow the shared rule: file lock, then FS metadata
+     mutex, then cache mutex, then scheduler queue mutex.
+
+
+5. QUESTIONS TO SETTLE WITH THE TEAM EARLY
+---------------------------------------------------------------------
+
+  With Shubham and Shwetank (Day 1):
+    - Does the CLI use open/read/write with file descriptors, or stateless
+      "read <file> <offset> <length>"? Stateless is simpler across separate client
+      invocations; I can provide both (fd functions plus path-based wrappers).
+    - Maximum data per write command, given the one-line text protocol.
+  With Shwetank (Day 7):
+    - Which functions does the dispatcher call under which lock mode?
+    - Who calls cache_flush at shutdown, and in what order?
+  With Aarush (Day 7):
+    - Confirm the scheduler thread is the only caller of disk_raw_*, so the disk
+      array itself needs no extra lock.
+
+
+6. DEFINITION OF DONE FOR YOUR PART
+---------------------------------------------------------------------
+
+  [ ] mkfs, load and save work; the disk survives a restart
+  [ ] create, delete, open, read, write, mkdir, cd, ls work in nested directories
+  [ ] Files larger than 10 blocks work (indirect block)
+  [ ] Disk full and bad paths return clean errors with no leaks
+  [ ] fs_report shows total/used/free, internal and external fragmentation
+  [ ] fs_check passes after every test and every multi-client run
+  [ ] Zero Valgrind and AddressSanitizer errors
+  [ ] Runs correctly under cache and scheduler (Day 7)
+  [ ] Fragmentation numbers and storage report section written
+  [ ] Branch merged to main with tests passing
