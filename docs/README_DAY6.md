@@ -1,36 +1,24 @@
-# Day 6 — IPC Reliability Tests
+# Day 6 - IPC reliability tests
 
-This add-on introduces fault-injection tests for Shubham's existing IPC layer.
-It does not change production IPC code or any other team member's modules.
+Fault-injection tests for the IPC layer (`ipc_call` with timeout and request-id matching).
+They do not change any production code.
 
 ## Files
+- `tests/day6_fault_server.c` - test server with modes `normal`, `wrong-id`, `delay`, `stale`.
+- `tests/day6_ipc_client.c`   - probe client; checks the expected result and (for failures) the exact errno.
+- `scripts/test_ipc_day6.sh`  - builds both into a temp dir and runs the four cases.
 
-- `tests/day6_fault_server.c` — one-request test server; can send a wrong request ID or delay its response.
-- `tests/day6_ipc_client.c` — probe client that checks expected success/failure.
-- `scripts/test_ipc_day6.sh` — compiles the probes and runs unavailable-server, wrong-ID, and delayed-response cases.
+## Cases
+| # | Situation | Expected |
+|---|-----------|----------|
+| 1 | server not running | `ipc_call` fails with `ENOENT` |
+| 2 | server answers with a wrong request id | reply is ignored, call fails with `ETIMEDOUT` |
+| 3 | server answers after the 1 s timeout (it sleeps 3 s) | call fails with `ETIMEDOUT` |
+| 4 | call 1 times out and its reply arrives late; call 2 follows | the late reply is skipped and call 2 gets its own reply |
+
+Case 4 is the important one: it proves a late reply is never mistaken for the answer to the next request.
+Every probe has a 15 s hard limit, so a hang counts as a failure.
 
 ## Run
-
-From the repository root:
-
-```bash
-./scripts/test_ipc_day6.sh
-```
-
-The script builds temporary binaries under `/tmp` and removes its temporary FIFO/build directory on exit.
-
-## Notes
-
-The tests deliberately expect `ipc_call()` to fail when no server is available, when only a mismatched request ID is returned, or when the response arrives after the IPC timeout. If the delayed-response case behaves differently because the project's configured timeout is longer than 10 seconds, increase the `sleep(10)` delay in `tests/day6_fault_server.c` and rerun.
-
-The existing echo test remains the sequential/multi-client regression test:
-
-```bash
-make echo-test
-```
-
-Run the full existing checks after the new tests:
-
-```bash
-make check
-```
+    make ipc-test        # or ./scripts/test_ipc_day6.sh
+    make check           # runs everything, including this

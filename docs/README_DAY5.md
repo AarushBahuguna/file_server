@@ -1,43 +1,12 @@
-# Day 5 – Client & Tooling package
+# Day 5 - statistics formatting and ops scripts
 
-This is an additive package for the Shubham/client-tooling part of the OS project.
-It adds repeatable shell smoke tests and a standalone formatter for key/value STATS output.
+- `include/stats.h`, `src/common/stats.c` - the stats text format (`key value` lines), server-side
+  `stats_put_*` helpers, and the CLI renderer: `stats` (table), `stats raw`, `stats csv`.
+  The key list per team member is at the top of `stats.h`.
+- `tests/fake_fs_server.c` - in-memory server speaking the real protocol, so the CLI and scripts can be
+  tested before the real server exists.
+- `scripts/ops_basic.sh`, `ops_dirs.sh`, `ops_errors.sh`, `ops_stats.sh`, `run_ops.sh` - self-checking scripts.
+  Against the real server:  `SERVER_BIN=./bin/server ./scripts/run_ops.sh`
+- `scripts/multi_client.sh` - N concurrent clients doing real work against an already running server; verified.
 
-## Included
-
-- `scripts/basic_ops.sh`: runs mkdir, create, ls, stats and delete through the CLI.
-- `scripts/multi_client.sh`: launches N independent CLI processes concurrently.
-- `scripts/format_stats.awk`: formats key/value STATS lines as a table.
-
-## Important compatibility note
-
-The exact server STATS response schema and the current `src/client/main.c` were not supplied
-with this package. Therefore the AWK formatter is intentionally standalone; it is not wired
-into the CLI automatically. It supports key/value lines separated by `:` or `=`. Do not replace
-your existing `main.c` or protocol files blindly. Once the current repository source is available,
-the formatter can be integrated against the actual STATS wire format without guessing.
-
-## Run
-
-Start the server in one terminal. In another terminal, from the repository root:
-
-```bash
-chmod +x scripts/basic_ops.sh scripts/multi_client.sh
-./scripts/basic_ops.sh shubham
-./scripts/multi_client.sh 4 shubham
-```
-
-Format a saved STATS response:
-
-```bash
-./bin/client shubham <<'COMMANDS' | awk -f scripts/format_stats.awk
-stats
-exit
-COMMANDS
-```
-
-If your CLI prints a prompt or non-key/value text, the formatter ignores lines without `:` or `=`.
-
-## Makefile
-
-No Makefile change is required: these are directly executable shell/AWK scripts.
+Run: `make stats-test`, `make ops-test`, or `make check` for everything.

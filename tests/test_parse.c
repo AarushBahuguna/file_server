@@ -40,6 +40,11 @@ int main(void) {
 
     assert(P("stats") == P_SERVER && pc.cmd == CMD_STATS);
     assert(P("stats now") == P_ERROR);
+    assert(P("stats") == P_SERVER && pc.stats_fmt == 0);
+    assert(P("stats table") == P_SERVER && pc.stats_fmt == 0);
+    assert(P("stats raw") == P_SERVER && pc.stats_fmt == 1);
+    assert(P("stats csv") == P_SERVER && pc.stats_fmt == 2);
+    assert(P("stats csv extra") == P_ERROR);
     assert(P("frobnicate") == P_ERROR);
 
     char longpath[300];

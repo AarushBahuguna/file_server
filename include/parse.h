@@ -17,6 +17,7 @@ typedef struct {
     uint32_t length;                  /* bytes to read */
     char     text[PARSE_MAX_TEXT];    /* payload for write (client sends it in 512-byte chunks) */
     size_t   text_len;
+    int      stats_fmt;               /* for stats: 0 table, 1 raw, 2 csv (see stats.h) */
 } parsed_cmd_t;
 
 /* P_SERVER: *out is filled, send it to the server. P_ERROR: err has a message. */

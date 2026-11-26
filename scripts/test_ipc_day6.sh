@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Day 6: IPC reliability and fault-injection tests.
+# Day 6: IPC reliability and fault-injection tests (4 cases).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -34,24 +34,33 @@ start_server() {
 
 stop_server() {
     if [ -n "${SERVER_PID:-}" ]; then
+        kill "$SERVER_PID" 2>/dev/null || true      # never wait forever for a stuck server
         wait "$SERVER_PID" 2>/dev/null || true
         unset SERVER_PID
     fi
     rm -f "$SERVER_FIFO"
 }
 
-echo "[1/3] Server unavailable"
-rm -f "$SERVER_FIFO"
-"$BUILD_DIR/probe_client" failure
+# every probe gets a hard 15 s limit, so a hang in ipc_call is reported as a failure
+probe() { timeout 15 "$BUILD_DIR/probe_client" "$@" || { echo "FAIL: probe '$*' (exit $?)" >&2; exit 1; }; }
 
-echo "[2/3] Wrong request ID"
+echo "[1/4] Server unavailable  -> must fail with ENOENT"
+rm -f "$SERVER_FIFO"
+probe failure ENOENT
+
+echo "[2/4] Wrong request ID    -> must be ignored, then time out"
 start_server wrong-id
-"$BUILD_DIR/probe_client" failure
+probe failure ETIMEDOUT
 stop_server
 
-echo "[3/3] Delayed response"
+echo "[3/4] Delayed response    -> must time out"
 start_server delay
-"$BUILD_DIR/probe_client" failure
+probe failure ETIMEDOUT
+stop_server
+
+echo "[4/4] Stale reply         -> late reply must be skipped, next call must succeed"
+start_server stale
+probe stale
 stop_server
 
 echo "ALL DAY 6 IPC FAULT TESTS PASSED"

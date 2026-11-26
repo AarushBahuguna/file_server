@@ -97,7 +97,17 @@ parse_result_t parse_command(const char *line, parsed_cmd_t *out, char *err, siz
     }
 
     if (!strcmp(w, "stats")) {
-        if (*skip_ws(p)) FAIL("usage: stats");
+        char f[16];
+        const char *q = next_token(p, f, sizeof f, &tl);
+        if (q) {
+            if (tl) FAIL("usage: stats [table|raw|csv]");
+            if (!strcmp(f, "table")) out->stats_fmt = 0;
+            else if (!strcmp(f, "raw")) out->stats_fmt = 1;
+            else if (!strcmp(f, "csv")) out->stats_fmt = 2;
+            else FAIL("usage: stats [table|raw|csv]");
+            p = q;
+        }
+        if (*skip_ws(p)) FAIL("usage: stats [table|raw|csv]");
         out->cmd = CMD_STATS;
         return P_SERVER;
     }
@@ -157,7 +167,7 @@ void print_help(void) {
          "  read <fd> <offset> <length>    read bytes from an open file\n"
          "  write <fd> <offset> <text...>  write text to an open file\n"
          "  delete <path>                  delete a file             (alias: rm)\n"
-         "  stats                          fragmentation, free space, cache, scheduler\n"
+         "  stats [table|raw|csv]          disk, fragmentation, cache, scheduler, locks (csv for graphs)\n"
          "  help                           this message\n"
          "  exit                           log out and quit");
 }

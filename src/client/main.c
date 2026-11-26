@@ -12,6 +12,7 @@
 #include "ipc.h"
 #include "parse.h"
 #include "log.h"
+#include "stats.h"
 
 #define MAX_TRACKED 64
 
@@ -109,6 +110,17 @@ static void print_text(const response_t *rs) {
     }
 }
 
+/* Server sends "key value" lines; show them as a report. Old free-text answers are printed as they are. */
+static void print_stats(const response_t *rs, int fmt) {
+    char text[PROTO_MAX_RESP_DATA + 1];
+    uint32_t n = rs->length > PROTO_MAX_RESP_DATA ? PROTO_MAX_RESP_DATA : rs->length;
+    memcpy(text, rs->data, n);
+    text[n] = '\0';
+    stats_t st;
+    if (stats_parse(text, n, &st) < 0) { print_text(rs); return; }
+    stats_render(&st, (stats_fmt_t)fmt, stdout);
+}
+
 static void do_read(const parsed_cmd_t *c) {
     uint32_t remaining = c->length, off = c->offset, total = 0;
     while (remaining > 0) {
@@ -158,8 +170,10 @@ static void do_simple(const parsed_cmd_t *c) {
     if (rs.status != ST_OK) { print_error(c, rs.status); return; }
     switch (c->cmd) {
     case CMD_LS:
-    case CMD_STATS:
         print_text(&rs);
+        break;
+    case CMD_STATS:
+        print_stats(&rs, c->stats_fmt);
         break;
     case CMD_CD:
         if (rs.length > 0) {                      /* server returns the new working directory */

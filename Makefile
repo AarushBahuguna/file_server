@@ -2,7 +2,7 @@
 CC      = gcc
 CFLAGS  = -Wall -Wextra -g -pthread -Iinclude
 LDFLAGS = -pthread
-COMMON  = src/common/ipc.c src/common/protocol.c src/common/log.c src/common/session.c
+COMMON  = src/common/ipc.c src/common/protocol.c src/common/log.c src/common/session.c src/common/stats.c
 
 .PHONY: all test clean
 
@@ -69,7 +69,27 @@ unit-test: bin/test_protocol bin/test_parse bin/test_session bin/test_log
 check: unit-test echo-test cli-test
 	@echo ALL CHECKS PASSED
 
-# ---- Shubham: Day 5 stats formatter tests ----
-.PHONY: stats-test
-stats-test:
-	./tests/test_stats.sh
+
+# ---- Shubham: Day 5 (stats formatting + ops scripts) ----
+bin/test_stats: tests/test_stats.c src/common/stats.c
+	@mkdir -p bin
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+bin/fake_fs_server: tests/fake_fs_server.c $(COMMON)
+	@mkdir -p bin
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+stats-test: bin/test_stats
+	./bin/test_stats
+
+ops-test: bin/client bin/fake_fs_server
+	./scripts/run_ops.sh
+
+check: stats-test ops-test
+
+# ---- Shubham: Day 6 IPC reliability ----
+.PHONY: ipc-test
+ipc-test:
+	./scripts/test_ipc_day6.sh
+
+check: ipc-test
