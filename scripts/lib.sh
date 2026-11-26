@@ -12,6 +12,10 @@ SRV_PID=""
 OUT=""
 
 start_server() {
+    if [ "${SERVER_RUNNING:-}" = "1" ]; then          # a server is already running (e.g. started by demo.sh)
+        [ -p "$FIFO" ] || { echo "SERVER_RUNNING=1 but no server FIFO found"; exit 1; }
+        return 0
+    fi
     rm -f "$FIFO"
     "$SERVER_BIN" > /tmp/ops_server.out 2>&1 &
     SRV_PID=$!

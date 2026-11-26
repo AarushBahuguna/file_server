@@ -93,3 +93,25 @@ ipc-test:
 	./scripts/test_ipc_day6.sh
 
 check: ipc-test
+
+# ---- Shubham: Day 7-10 (demo, concurrency, bench, report) ----
+.PHONY: demo multi-rw stress bench-ipc report integration
+demo: bin/client bin/fake_fs_server
+	./scripts/demo.sh
+
+multi-rw: bin/client bin/fake_fs_server
+	./scripts/multi_rw.sh
+
+stress: bin/client bin/fake_fs_server
+	./scripts/stress.sh
+
+bench-ipc: bin/echo_server bin/echo_client
+	./scripts/bench_ipc.sh
+
+report:
+	./scripts/build_report.sh
+
+integration: bin/client
+	./scripts/integration_real.sh
+
+check: multi-rw stress
