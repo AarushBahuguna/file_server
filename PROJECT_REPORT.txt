@@ -1,0 +1,211 @@
+MULTI-USER FILE SYSTEM WITH CONCURRENT ACCESS (FILE SERVER)
+TECHNICAL PROJECT REPORT
+
+Project Root: /home/aarushb/Documents/file_server/file_server
+Language/OS: C (GNU11 / C11) on Linux (POSIX Threads, FIFOs, TCP Sockets)
+Team Members:
+- Arjun Bansal (Storage & File System)
+- Shwetank Tiwari (Server, Synchronization & Cache)
+- Aarush Bahuguna (Disk Scheduling & Deadlock Detection)
+- Shubham Gupta (Client CLI, IPC, Protocol, Sessions & Logging)
+
+1. ABSTRACT
+
+This report presents the design, implementation, and evaluation of a Multi-User File System with Concurrent Access implemented in C on Linux. The project simulates an end-to-end operating system storage and file-server stack—spanning a persistent 1 MiB block-based disk image, an inode-indexed hierarchical file system, an LRU write-back block cache, a multi-threaded request server, per-file reader-writer locking with starvation policies, wait-for graph deadlock detection and recovery, disk head scheduling (FCFS, SCAN, and C-SCAN), and dual-transport client/server communication over POSIX named pipes (FIFOs) and TCP/IP sockets.
+
+Each subsystem was built and validated independently using unit tests and mock interfaces before being integrated behind a frozen, fixed-size binary message protocol (<= PIPE_BUF). Experimental validation confirms exact textbook disk scheduling behavior (FCFS = 640, SCAN = 236, C-SCAN = 382), deterministic cycle detection and youngest-victim recovery across 2-cycle, 3-cycle, and non-cyclic wait-chain topologies, thread-safe multi-client operation across local and networked clients, and substantial reductions in simulated disk head movement using elevator scheduling and block caching.
+
+2. INTRODUCTION
+
+Modern operating systems must allow multiple users and concurrent processes to create, navigate, read, write, and delete files safely on shared storage media. Building a concurrent file server requires coordinating several core OS mechanisms that are often studied in isolation:
+
+1. Secondary storage layout (superblocks, free-space bitmaps, inodes, and directory trees).
+2. Inter-Process Communication (IPC) and network transport between decoupled client processes and a stateful server daemon.
+3. Server concurrency using bounded producer-consumer worker pools.
+4. Reader-writer synchronization with starvation control and deadlock avoidance or detection/recovery.
+5. Block caching (LRU replacement and dirty write-back) to minimize slow storage access.
+6. Disk scheduling to minimize mechanical or logical head movement across queued block requests.
+
+This project integrates all six layers into a working, testable C/Linux file server. Clients connect via an interactive or scripted command-line interface (CLI) over either local named pipes (/tmp/fs_server_fifo) or TCP sockets (port 9000 by default). The server maintains per-session working directories and open file descriptors, serializes conflicting file operations using per-file reader-writer locks, tracks lock dependencies in a wait-for graph, manages disk blocks on a 2,048-block simulated disk persisted to disk.img, and records timestamped audit logs and operational telemetry.
+
+3. PROBLEM STATEMENT
+
+When multiple users access a shared file system concurrently without proper coordination, four fundamental failures occur:
+
+1. Data Races and Corruption: Unsynchronized concurrent writes or read-modify-write operations on shared files and metadata structures produce lost updates, torn reads, and corrupted directory/bitmap states.
+2. Starvation and Unbounded Blocking: Naive locking allows continuous streams of readers to starve writers (or vice versa), degrading fairness.
+3. Resource Deadlocks: Multi-file or multi-step locking across concurrent sessions (for example, Session A holds File 1 and requests File 2 while Session B holds File 2 and requests File 1) halts participating clients indefinitely unless cycles are detected and broken.
+4. Poor I/O Efficiency and High Latency: Servicing uncached, unscheduled disk requests strictly in arrival order (FCFS) incurs excessive disk head travel and redundant storage reads/writes.
+
+Additionally, supporting both local multi-process IPC and multi-machine remote access requires a framing-safe, fixed-size protocol and session model that cleanly cleans up open descriptors and locks when clients log out or terminate.
+
+4. OBJECTIVES
+
+The primary objectives of the project are:
+
+1. Persistent Indexed File System: Implement a 2,048-block (512 bytes/block, 1 MiB total) virtual disk persisted in disk.img with a superblock, free-block bitmap, 128 inodes (10 direct + 1 single-indirect pointer, 70,656-byte max file size), hierarchical directories, path resolution (absolute/relative, ., ..), fragmentation reporting (fs_report), and structural consistency checking (fs_check).
+2. Atomic IPC & Multi-Laptop Networking: Define a frozen fixed-size request_t / response_t protocol fitting within PIPE_BUF (4096 bytes) for atomic FIFO writes, and extend it seamlessly over TCP sockets for multi-laptop client access.
+3. Concurrent Server Architecture: Build a POSIX-threaded server featuring a semaphore-bounded producer-consumer thread pool (FIFO mode) and dedicated connection threads (TCP mode) with graceful signal-driven shutdown.
+4. Synchronization & Starvation Policies: Implement per-file reader-writer locks supporting READER_PREFERENCE, WRITER_PREFERENCE, and FAIR_POLICY with abortable timed waits.
+5. Wait-For Graph Deadlock Detection & Recovery: Maintain a 64x64 session wait-for graph, detect cycles via 3-color DFS (on-request and periodic modes), select the youngest session as victim, abort its wait, release its locks, and return -EDEADLK (ST_ERR_DEADLOCK).
+6. LRU Caching & Disk Scheduling: Implement a 64-entry hash-indexed LRU write-back cache and a background disk scheduler supporting FCFS, SCAN, and C-SCAN with reproducible benchmarking and textbook verification.
+7. Observability & Testing: Provide thread-safe timestamped logging, structured statistics (table, raw, csv), automated demo scripts, and unit/integration test suites.
+
+5. PROBLEM SOLUTION AND SCOPE
+
+5.1 Solution Overview
+
+The system solves concurrent multi-user file access through a layered client-server architecture:
+
+- Protocol & Transport Isolation: All client commands (LOGIN, LOGOUT, MKDIR, CD, LS, CREATE, OPEN, CLOSE, READ, WRITE, DELETE, STATS) are serialized into fixed-size request_t structs tagged with a req_id and client_pid. Clients automatically chunk large read and write operations to fit protocol payload limits (PROTO_MAX_REQ_DATA = 512, PROTO_MAX_RESP_DATA = 3072).
+- Session Isolation: The server maintains up to SESS_MAX = 64 active sessions, each tracking username, normalized current working directory (cwd), and up to SESS_MAX_FDS = 32 logical file descriptors (starting at FD 3). On client exit or logout, open descriptors and locks are reclaimed.
+- Lock-Ordered Concurrency Control: The server enforces strict lock hierarchy disciplines (file lock -> FS metadata mutex -> cache mutex -> scheduler queue mutex). File operations acquire read or write locks keyed by canonical path hash; metadata operations serialize under meta in fs.c.
+- Deadlock Handling: Lock wait, grant, and release events update a 64x64 wait-for matrix. DFS cycle detection identifies cycles and marks the youngest session (highest ID) aborted (-EDEADLK), allowing the waiting pthread_cond_timedwait loop in rwlock.c to unwind cleanly.
+- Caching and Disk Scheduling: A 64-block LRU cache buffers hot blocks and defers dirty writes until eviction or cache_flush(). Below the cache, the disk scheduler orders pending block requests using FCFS, SCAN (elevator), or C-SCAN (circular elevator).
+
+5.2 Project Scope
+
+In Scope:
+- Educational Linux/POSIX user-space file server and CLI client.
+- Single-server, multi-client concurrency (up to 64 concurrent sessions).
+- Virtualized disk storage backed by a single host image file (disk.img).
+- Dual transport: local POSIX FIFOs and IPv4 TCP sockets.
+- Unit, integration, stress, deadlock, and scheduling benchmarks.
+
+Out of Scope:
+- FUSE or Linux VFS kernel module integration.
+- Write-ahead crash journaling or power-loss atomic commit logs.
+- Per-user POSIX ACL/permission enforcement or encrypted authentication (usernames identify sessions without passwords; TCP traffic is plaintext).
+- Distributed/replicated storage across multiple server nodes.
+
+6. TECH STACK
+
+- Programming Language: C (GNU11 / C11 standard, -std=gnu11 -Wall -Wextra)
+- Target Platform: Linux (POSIX-compliant environment)
+- Compiler: GCC (gcc)
+- Concurrency & Synchronization: POSIX Threads (pthread_t, pthread_mutex_t, pthread_cond_t with pthread_cond_timedwait) and POSIX Unnamed Semaphores (sem_t)
+- Local IPC: POSIX Named Pipes / FIFOs (mkfifo, O_RDWR, O_WRONLY | O_NONBLOCK, poll(), PIPE_BUF atomic writes)
+- Network Transport: BSD / POSIX TCP/IPv4 Sockets (AF_INET, SOCK_STREAM, SO_REUSEADDR, SO_RCVTIMEO, inet_pton)
+- Signal Handling: sigaction (SIGINT, SIGTERM, SIGPIPE ignored)
+- Timing & Telemetry: clock_gettime (CLOCK_MONOTONIC & CLOCK_REALTIME)
+- Automation & Testing: Bash shell scripts (scripts/*.sh), C unit/stress harnesses (tests/*.c), CSV data export
+
+7. SYSTEM ARCHITECTURE
+
+7.1 High-Level Component Layers
+
+The integrated codebase is organized cleanly into four collaborating subsystems arranged in a layered stack:
+
+Layer 1 - CLI Client (Shubham):
+Files: src/client/main.c, src/client/parse.c, src/common/stats.c, src/common/log.c
+Role: Interactive and scripted CLI supporting mkdir, cd, ls, create, open, read, write, close, delete, stats [table|raw|csv], help, and exit.
+
+Layer 2 - Transport Layer (Local Mode vs Network Mode):
+- Local Mode (default): POSIX Named Pipes in src/common/ipc.c using /tmp/fs_server_fifo and per-client reply FIFOs /tmp/fs_client_<pid>.
+- Network Mode (FS_TRANSPORT=tcp): IPv4 TCP Sockets in src/common/ipc_tcp.c on port 9000 (configurable) carrying fixed-size request/response structs.
+
+Layer 3 - Server Front-End & Concurrency:
+- FIFO Listener & Workers: src/server.c and src/threadpool.c with a 64-slot bounded queue and 4 worker threads.
+- TCP Accept & Connection Threads: src/server_tcp.c spawning 1 detached thread per client and assigning network session IDs starting above 100000.
+
+Layer 4 - Request Dispatcher & Sessions:
+Files: src/dispatcher.c, src/common/session.c, src/common/log.c
+Role: Maps PID/Network ID to session_t (cwd, logical FDs 3..34), maps logical FDs to Arjun open_file_t FDs (g_real_fds), and acquires/releases per-file RW locks keyed by path hash.
+
+Layer 5 - Synchronization, Deadlock Detection, Storage, Cache & Disk:
+- Synchronization & Deadlock (Shwetank & Aarush): src/rwlock.c (257-bucket FileLock table, Fair/Reader/Writer preference policies, 100 ms timedwait abort check) and src/waitfor.c (64x64 adjacency matrix, 3-color DFS cycle detection, youngest-victim -EDEADLK recovery).
+- Storage File System (Arjun): src/fs.c, src/dir.c, src/alloc.c (superblock, bitmap, 128 inodes with 10 direct + 1 indirect pointers, global meta mutex, fs_report, fs_check).
+- Cache & Scheduler (Shwetank & Aarush): src/cache.c (64-entry LRU + 127-bucket hash table, dirty write-back) and src/sched.c (FCFS / SCAN / C-SCAN background scheduling thread).
+- Simulated Disk: src/disk.c (2048 x 512B = 1 MiB virtual disk persisted in disk.img).
+
+7.2 Protocol & IPC Layer (include/protocol.h, src/common/ipc*.c)
+
+- Messages are fixed-size C structs (request_t and response_t) statically asserted at compile time to be <= PIPE_BUF (4096 bytes), guaranteeing atomic single-write() framing on POSIX FIFOs without interleaved bytes between concurrent clients.
+- Each request_t carries req_id, client_pid, cmd, fd, mode, offset, length, user[32], path[128], and data[512].
+- Each response_t returns req_id, status (status_t enum mapping POSIX errors including ST_ERR_DEADLOCK), fd, length, and data[3072].
+- In FIFO mode, clients open their reply FIFO /tmp/fs_client_<pid> in O_RDWR before sending requests and match resp.req_id == req.req_id under a configurable poll() timeout (default 30,000 ms), discarding stale replies.
+- In TCP mode, tcp_client_call() sends and receives full structs over a persistent SOCK_STREAM socket with SO_RCVTIMEO.
+
+7.3 Server Concurrency & Request Dispatch (src/server*.c, threadpool.c, dispatcher.c)
+
+- Local FIFO Server (src/server.c): Opens /tmp/fs_server_fifo as O_RDWR (avoiding EOF when the last client disconnects), initializes disk, cache, scheduler, locks, dispatcher, and logs, and pushes requests into a 64-slot bounded circular buffer serviced by 4 worker threads (MAX_WORKERS = 4) synchronized by queue_mutex, empty_slots, and full_slots semaphores.
+- TCP Server (src/server_tcp.c): Binds INADDR_ANY on port 9000 (or FS_SERVER_PORT), spawns tcp_accept_loop, and creates one detached tcp_connection_thread per client, assigning a unique monotonic network ID (g_tcp_session_counter starting at 100001) to req.client_pid and calling dispatch_request_sync() directly.
+- Dispatcher (src/dispatcher.c): Handles CMD_LOGIN and CMD_LOGOUT (on logout, closes every real FD in g_real_fds and releases every held file lock). It resolves relative paths against the session's cwd via session_resolve(), and acquires LOCK_READ (CMD_LS, CMD_OPEN with OPEN_READ) or LOCK_WRITE (CMD_MKDIR, CMD_CREATE, CMD_DELETE, CMD_OPEN with OPEN_WRITE) using a DJB2 hash of the canonical path as file_id, mapping PIDs to wait-for graph session IDs via pid % SESS_MAX.
+- Clean Shutdown Sequence (SIGINT/SIGTERM): Stop accepting -> drain/join workers -> cache_flush() -> disk_save("disk.img") -> cache_destroy() -> sched_shutdown() -> lock_manager_destroy() -> fs_unmount() -> log_close().
+
+7.4 Synchronization & Deadlock Detection (src/rwlock.c, src/waitfor.c)
+
+- Per-File RW Lock Manager (src/rwlock.c): Uses a 257-bucket chained hash table (LOCK_TABLE_SIZE = 257). Each FileLock stores readers, writer, waiting_readers, waiting_writers, and reader_sessions[MAX_SESSIONS] so multiple concurrent readers are tracked individually. Policies include READER_PREFERENCE, WRITER_PREFERENCE, and FAIR_POLICY (default).
+- Abortable Waits: lock_acquire() registers dependencies via wfg_on_wait(session, file_id, holders, holder_count) and waits in a 100 ms pthread_cond_timedwait loop checking wfg_is_aborted(session), returning -EDEADLK if aborted. On grant or release, it calls wfg_on_grant / wfg_on_release.
+- Wait-For Graph (src/waitfor.c): Maintains a 64x64 adjacency matrix g_edges[waiter][holder] protected by g_graph_mutex. wfg_detect() runs a 3-color (WHITE/GRAY/BLACK) DFS from either a single start_session (on-request mode) or all sessions (periodic mode). Upon detecting a back-edge to a GRAY node, it extracts the cycle path, picks the youngest session (highest session ID), and wfg_recover_victim() sets g_aborted[victim] = 1 and clears all edges incident to the victim.
+
+7.5 Storage, Caching & Disk Scheduling (src/fs.c, src/cache.c, src/sched.c, src/disk.c)
+
+- On-Disk Layout (include/common.h, include/fs.h): Block 0 holds superblock_t (magic = 0x4D465331, block/inode counts). Block 1 holds the free-block bitmap (2,048 bits). Blocks 2-17 hold the inode table (128 inode_t entries x 64 bytes = 8 per block). Blocks 18-2047 hold 2,030 data blocks (512 bytes each). Inodes have 10 direct pointers + 1 single-indirect pointer (128 uint32_t block numbers), giving a max file size of (10 + 128) * 512 = 70,656 bytes. Directories store 32-byte dir_entry_t records (28-byte name + 4-byte inode number, 16 per block).
+- LRU Write-Back Cache (src/cache.c): 64 CacheEntry slots indexed by a 127-bucket hash table and doubly-linked LRU list. Dirty writes are buffered and flushed back via sched_submit() on eviction or cache_flush().
+- Disk Scheduler (src/sched.c): Background thread dequeuing struct disk_req items via pick_next_node() according to SCHED_FCFS, SCHED_SCAN (elevator bouncing at block 0 and 199), or SCHED_CSCAN (unidirectional sweep counting the return wrap jump). Exposes pure sched_pick_next() for deterministic testing.
+
+8. OBSERVATIONS AND LIMITATIONS
+
+8.1 Experimental Observations
+
+1. Textbook Scheduling Verification (tests/test_sched.c): Starting at disk head 53 with request queue {98, 183, 37, 122, 14, 124, 65, 67} over blocks 0-199, the scheduler matched theoretical textbook totals:
+- FCFS: 640 tracks
+- SCAN: 236 tracks (moving down first to 0, then reversing up)
+- C-SCAN: 382 tracks (sweeping up to 199, wrapping to 0, counting jump)
+
+2. Benchmark Comparison (src/bench.c & docs/results/bench_results.csv): Averaged across 5 fixed-seed runs (seeds 700, 801, 902, 1003, 1104) of 1,000 random requests over blocks 0-199 with a 64-entry cache:
+- FCFS (cache off): 68,141 avg head movement | ~681 us latency | 1,468 req/s
+- FCFS (cache on): 68,141 avg head movement | ~681 us latency | 1,466 req/s | ~31.1% hit ratio
+- SCAN (cache off): 252 avg head movement | 2 us latency | 396,825 req/s
+- SCAN (cache on): 252 avg head movement | 3 us latency | 318,311 req/s | ~31.1% hit ratio
+- C-SCAN (cache off): 397 avg head movement | 3 us latency | 251,889 req/s
+- C-SCAN (cache on): 397 avg head movement | 4 us latency | 217,789 req/s | ~31.1% hit ratio
+Elevator policies (SCAN and C-SCAN) reduced random-workload head travel by >99% relative to FCFS when requests are batched in the queue.
+
+3. Deadlock & Concurrency Validation (tests/test_deadlock.c, scripts/rehearse_demos.sh):
+- 2-session cycles (0 -> 1 -> 0) and 3-session cycles (0 -> 1 -> 2 -> 0) were reliably detected; youngest-victim selection aborted sessions 1 and 2 respectively and cleared their edges.
+- Non-cyclic wait chains (0 -> 1 -> 2) produced zero false positives, and edge cleanup on wfg_on_grant / wfg_on_release prevented stale-edge false alarms across 100 consecutive test suite runs.
+- On-request detection catches cycles immediately upon wfg_on_wait (DFS from the new waiter only), whereas periodic detection scans all 64 nodes once per ~1 second (docs/results/detector_modes.txt).
+
+8.2 System Limitations (Observed in Code & Architecture)
+
+1. Live Storage-to-Cache Bypass (src/fs.c -> src/disk.c): In the current integrated codebase, fs.c, alloc.c, and dir.c invoke disk_read() / disk_write(), which in src/disk.c wrap directly to disk_raw_read() / disk_raw_write(). Consequently, live file server fs_* calls bypass cache_get() / cache_put() and sched_submit(), leaving cache and scheduler counters at zero during normal client CLI operations unless routed through cache_*.
+
+2. Scheduler disk_raw_* Interface & Block Range Mismatch: src/sched.c declares extern int disk_raw_read(int block) (1 argument, matching tests/mock_disk.c) and sets DISK_MAX_BLOCK = 199, whereas src/disk.c defines disk_raw_read(uint32_t b, void *buf) (2 arguments) over NUM_BLOCKS = 2048. Bridging cache.c -> sched.c -> disk.c for all 2,048 blocks requires passing req->block and req->buf in sched.c and updating DISK_MAX_BLOCK to NUM_BLOCKS - 1.
+
+3. Automatic Deadlock Detector Trigger in rwlock.c: rwlock.c records wait/grant/release edges in waitfor.c and polls wfg_is_aborted(session), but does not yet automatically invoke wfg_detect() + wfg_recover_victim() inside lock_acquire() (nor spawn a background periodic detector thread in server.c). Additionally, rwlock.c treats lock->writer == 0 as "no writer", so session ID 0 cannot cleanly distinguish holding a write lock from an unlocked state.
+
+4. Bounded Session & PID-Modulo Collisions: dispatcher.c maps client_pid to g_real_fds and graph_session() via pid % SESS_MAX (SESS_MAX = 64). Two simultaneous clients whose PIDs or network IDs collide modulo 64 would overwrite each other's FD table slots or wait-for graph node. Also, session_find_dead() uses kill(pid, 0), which is valid for local PIDs but not yet scheduled on a server reaper loop and does not apply to remote TCP session IDs (> 100000).
+
+5. Cache Concurrency & Benchmark Idealizations:
+- cache.c performs blocking sched_submit() write-backs while holding cache_mutex during dirty eviction and cache_flush(), and lacks a per-entry "loading" state to deduplicate concurrent misses on the same block.
+- bench.c models cache hits separately from policy_movement(), so cache-on rows in bench_results.csv still schedule all 1,000 block movements rather than filtering out hits before policy_movement().
+- In low-concurrency interactive runs without a batching window or seek delay, scheduler queue depth remains <= 1, causing FCFS, SCAN, and C-SCAN to select identically.
+
+6. File System & Security Constraints:
+- Maximum disk size is 1 MiB (2048 x 512B), max inodes is 128, max filename is 28 bytes, and max file size is 70,656 bytes (10 direct + 128 indirect).
+- fs.c serializes all file I/O behind a single global meta mutex rather than per-inode metadata locks, limiting true parallel read throughput.
+- No write-ahead crash journal exists (unclean SIGKILL skips cache_flush and disk_save), permissions/ownership bits are stored but not enforced, and TCP transport is unencrypted and unauthenticated.
+
+9. CONCLUSION AND FUTURE SCOPE
+
+9.1 Conclusion
+
+The Multi-User File System with Concurrent Access successfully demonstrates how core operating system subsystems—block storage, indexed file management, multi-threaded IPC/networking, reader-writer synchronization, deadlock detection, LRU caching, and disk scheduling—integrate into a cohesive concurrent file server. Each member's module operates cleanly behind well-defined C header contracts, verified by standalone unit suites (test_fs, test_protocol, test_session, test_stats, test_rwlock, test_cache, test_sched, test_deadlock, test_integration), multi-client shell scripts, and multi-laptop TCP smoke tests.
+
+9.2 Future Scope
+
+1. Complete disk_read/disk_write -> cache -> sched -> disk_raw_* Wiring: Route fs.c/alloc.c/dir.c I/O through cache_get/cache_put, align sched.c with the 2-argument disk_raw_read/write signature across blocks 0..2047, and add a configurable scheduler batching window.
+2. Live Automated Deadlock Detection & Reaper Loop: Call wfg_detect() and wfg_recover_victim() automatically in rwlock.c (using -1 as the unlocked writer sentinel so session 0 is valid), add a background periodic deadlock/session-reaper thread (handling both local dead PIDs and disconnected TCP sockets), and allocate unique graph/FD slots by session index rather than pid % 64.
+3. Fine-Grained Inode Locking & Lock Cleanup: Replace fs.c's global meta mutex with finer-grained inode/bitmap locks and add reference-counted reclamation of unused FileLock entries in rwlock.c, plus a per-entry loading flag in cache.c.
+4. Crash Recovery & Security: Add write-ahead logging (journaling) for metadata consistency on unexpected crashes, enforce POSIX-style user/group permissions (inode_t.permissions and owner), and add TLS + password/token authentication for remote TCP clients.
+5. Extended Storage Limits: Support double-indirect pointers, larger disk images, and FUSE mounting so standard Linux applications can interact with the file system directly.
+
+10. REFERENCES
+
+1. Operating System Concepts (10th Edition) — Abraham Silberschatz, Peter Baer Galvin, Greg Gagne (Disk Scheduling: FCFS, SCAN, C-SCAN; Deadlock Detection via Wait-For Graphs; File System Implementation & Inode Allocation).
+2. Operating Systems: Three Easy Pieces (OSTEP) — Remzi H. Arpaci-Dusseau and Andrea C. Arpaci-Dusseau (Concurrency, Condition Variables, Producer-Consumer Queues, Reader-Writer Locks, Persistence & Crash Consistency).
+3. Advanced Programming in the UNIX Environment (3rd Edition) — W. Richard Stevens, Stephen A. Rago (POSIX FIFOs, PIPE_BUF Atomicity, poll(), sigaction, Non-blocking I/O).
+4. Beej's Guide to Network Programming — Brian "Beej" Hall (AF_INET, SOCK_STREAM, bind, listen, accept, partial send/recv loops).
+5. Project Source Code & Internal Documentation (/home/aarushb/Documents/file_server/file_server): README.md, HOW_TO_RUN.txt, os-project.txt, include/*.h, src/*.c, src/common/*.c, src/client/*.c, tests/*.c, scripts/*.sh, docs/deadlock_scheduling_section.md, docs/demo_qa.md, docs/slides.md, docs/results/bench_results.csv, docs/results/detector_modes.txt, read/*_work.txt, readmeS/README_*.md.

@@ -23,7 +23,7 @@ HOW TO RUN THE INTEGRATED PROJECT
 
 5. Local FIFO mode:
    Terminal 1: ./server
-   Terminal 2: ./client alice
+   Terminal 2: ./client aarushb
 
 6. Multi-laptop TCP mode:
    On the server laptop:
@@ -38,7 +38,7 @@ HOW TO RUN THE INTEGRATED PROJECT
      export FS_TRANSPORT=tcp
      export FS_SERVER_HOST=<server-laptop-IP>
      export FS_SERVER_PORT=9000
-     ./client alice
+     ./client aarushb
 
    Use a different username on different laptops or client processes.
 
